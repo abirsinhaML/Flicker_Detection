@@ -1,0 +1,39 @@
+sampling:
+  window_duration: 3.0
+  stride: 20.0
+  overlap: 0.0
+  min_window_duration: 2.0
+  mode: uniform
+  resize: [320, 180]
+
+detector_version: "0.1.0"
+
+illuminant_detector:
+  enabled: true
+  peak_prominence: 4.0
+  peak_to_median_ratio: 8.0
+
+rolling_band_detector:
+  enabled: true
+  smoothing_sigma: 2.0
+
+awb_detector:
+  enabled: true
+  min_chroma_std: 0.5
+  ae_max_frequency: 5.0
+
+aggregation:
+  positive_threshold: 0.5
+  weights:
+    IlluminantDetector: 0.30
+    RollingBandDetector: 0.50
+    AWBDetector: 0.20
+  rolling_band_normalization:
+    band_strength_reference: 10.0
+    velocity_reference: 30.0
+    position_variance_reference: 50.0
+    periodicity_reference: 8.0
+
+decision:
+  mild_threshold: 0.35
+  extreme_threshold: 0.70

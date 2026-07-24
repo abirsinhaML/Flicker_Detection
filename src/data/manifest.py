@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
 
 import pandas as pd
 
@@ -32,18 +32,14 @@ class ManifestReader:
         self.manifest_path = Path(manifest_path)
 
         if not self.manifest_path.exists():
-            raise FileNotFoundError(
-                f"Manifest not found: {self.manifest_path}"
-            )
+            raise FileNotFoundError(f"Manifest not found: {self.manifest_path}")
 
         self.df = pd.read_csv(self.manifest_path)
 
         missing = self.REQUIRED_COLUMNS.difference(self.df.columns)
 
         if missing:
-            raise ValueError(
-                f"Manifest missing required columns: {sorted(missing)}"
-            )
+            raise ValueError(f"Manifest missing required columns: {sorted(missing)}")
 
     def __len__(self) -> int:
         return len(self.df)
@@ -51,12 +47,9 @@ class ManifestReader:
     def __iter__(self) -> Iterator[ManifestEntry]:
 
         for row in self.df.itertuples(index=False):
-
             yield ManifestEntry(
                 key=row.key,
                 size_bytes=int(row.size_bytes),
-                last_modified=datetime.fromisoformat(
-                    str(row.last_modified)
-                ),
+                last_modified=datetime.fromisoformat(str(row.last_modified)),
                 presigned_url=row.presigned_url_7day,
             )

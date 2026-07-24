@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project outputs
+output/
+reports/
+results/
+
+# Video files (avoid committing large media)
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Lock files are committed (uv.lock), but allow ignoring pip
+pip-log.txt
+
+# Logs
+*.log
