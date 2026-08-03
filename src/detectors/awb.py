@@ -20,119 +20,105 @@ from src.core.types import FeatureVector
 from src.detectors.base import BaseDetector
 from src.features.frequency import FrequencyAnalyzer
 
+# Below this many frames a windowed spectrum is not meaningful.
+_MIN_CHROMA_FRAMES = 8
+# Correlation is undefined for a flat signal; treat it as no evidence either way.
+_NEUTRAL_DECORRELATION = 0.5
+
 
 @dataclass(slots=True)
-class AWBResult:
-    """Evidence of auto-exposure or auto-white-balance hunting."""
+class AWBMetrics:
+    """Measurements of auto-exposure and auto-white-balance hunting.
 
-    score: float
+    Two independent evidence channels, both reported raw:
+
+    * chroma — periodic oscillation in Lab a*/b* magnitude and how strongly it
+      moves, plus its independence from luma
+    * AE — periodic luminance oscillation, and whether the dominant luminance
+      frequency falls inside the auto-exposure band at all
+    """
+
+    chroma_prominence: float
     chroma_periodicity: float
     chroma_variance: float
-    ae_evidence: float
     luma_chroma_decorrelation: float
+    ae_prominence: float
+    ae_periodicity: float
+    ae_modulation_depth: float
+    ae_dominant_frequency: float
+    ae_in_band: bool
 
 
 class AWBDetector(BaseDetector):
-    """Detect AE/AWB hunting from chroma and low-frequency luma oscillation.
+    """Measure AE/AWB hunting from chroma and low-frequency luma oscillation.
 
-    The detector evaluates two independent evidence channels:
+    The AE band separates two *mechanisms* rather than grading severity:
+    auto-exposure controllers hunt at a few hertz, while the mains beat sits
+    higher and belongs to :class:`~src.detectors.illuminant.IlluminantDetector`.
+    The band therefore stays here as a definition, while the magnitude of the
+    evidence is graded in
+    :class:`~src.calibration.thresholds.AWBNormalizer`.
 
-    1. **Chroma hunting** — periodic oscillation in Lab a*/b* magnitude that is
-       decorrelated from luminance.  True illuminant flicker modulates both
-       luma and chroma together, whereas AWB hunting shifts colour independently.
-
-    2. **AE hunting** — low-frequency (below ``ae_max_frequency``) periodic
-       luminance oscillation that falls outside the mains-beat band targeted
-       by :class:`IlluminantDetector`.
-
-    The final score is the maximum of the two channels, clamped to [0, 1].
+    ``ae_min_frequency`` excludes the slowest content, which is dominated by
+    egocentric head motion and exposure drift rather than controller hunting.
+    The separation is imperfect: genuine AE hunting and head motion overlap in
+    this band, and nothing here can fully distinguish them.
     """
 
-    def __init__(
-        self,
-        min_chroma_std: float = 0.5,
-        ae_max_frequency: float = 5.0,
-    ) -> None:
-        if not isfinite(min_chroma_std) or min_chroma_std < 0:
-            raise ValueError("min_chroma_std must be a finite, non-negative value")
+    def __init__(self, ae_min_frequency: float = 0.5, ae_max_frequency: float = 5.0) -> None:
         if not isfinite(ae_max_frequency) or ae_max_frequency <= 0:
             raise ValueError("ae_max_frequency must be a finite value greater than zero")
+        if not isfinite(ae_min_frequency) or ae_min_frequency < 0:
+            raise ValueError("ae_min_frequency must be a finite, non-negative value")
+        if ae_min_frequency >= ae_max_frequency:
+            raise ValueError("ae_min_frequency must be below ae_max_frequency")
 
-        self.min_chroma_std = min_chroma_std
+        self.ae_min_frequency = ae_min_frequency
         self.ae_max_frequency = ae_max_frequency
 
-    def detect(self, features: FeatureVector) -> AWBResult:
-        """Score AE/AWB evidence from shared feature signals."""
-        chroma_score, chroma_periodicity, chroma_var = self._chroma_hunting(features)
-        ae_score = self._ae_hunting(features)
-        decorrelation = self._luma_chroma_decorrelation(features)
+    def detect(self, features: FeatureVector) -> AWBMetrics:
+        """Measure both hunting channels without scoring either."""
+        chroma_prominence, chroma_periodicity, chroma_variance = self._chroma_oscillation(features)
+        # The AE channel asks the retained spectrum for its own band rather than
+        # reusing the flicker peak, which is deliberately selected above it.
+        ae_peak = features.frequency.peak_in_band(
+            min_frequency=self.ae_min_frequency,
+            max_frequency=self.ae_max_frequency,
+        )
 
-        # Boost chroma score when decorrelated from luma (true AWB, not illuminant)
-        adjusted_chroma = chroma_score * (0.5 + 0.5 * decorrelation)
-
-        combined = float(np.clip(max(adjusted_chroma, ae_score), 0.0, 1.0))
-
-        return AWBResult(
-            score=combined,
+        return AWBMetrics(
+            chroma_prominence=chroma_prominence,
             chroma_periodicity=chroma_periodicity,
-            chroma_variance=chroma_var,
-            ae_evidence=ae_score,
-            luma_chroma_decorrelation=decorrelation,
+            chroma_variance=chroma_variance,
+            luma_chroma_decorrelation=self._luma_chroma_decorrelation(features),
+            ae_prominence=ae_peak.prominence,
+            ae_periodicity=ae_peak.peak_to_median_ratio,
+            ae_modulation_depth=features.frequency.modulation_depth,
+            ae_dominant_frequency=ae_peak.frequency,
+            ae_in_band=ae_peak.found,
         )
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _chroma_hunting(self, features: FeatureVector) -> tuple[float, float, float]:
-        """Score periodic oscillation in the chroma channels."""
+    @staticmethod
+    def _chroma_oscillation(features: FeatureVector) -> tuple[float, float, float]:
+        """Measure periodic oscillation in the chroma magnitude signal."""
         chroma_a = np.asarray(features.chroma_a, dtype=np.float32)
         chroma_b = np.asarray(features.chroma_b, dtype=np.float32)
 
-        if chroma_a.size < 8:
+        if chroma_a.size < _MIN_CHROMA_FRAMES:
             return 0.0, 0.0, 0.0
 
-        chroma_mag = np.sqrt(chroma_a**2 + chroma_b**2)
-        chroma_std = float(np.std(chroma_mag))
-
-        if chroma_std < self.min_chroma_std:
-            return 0.0, 0.0, chroma_std
-
-        freq_features = FrequencyAnalyzer.compute(chroma_mag, features.fps)
-        periodicity = freq_features.peak_to_median_ratio
-        prominence = freq_features.peak_prominence
-
-        # Score: strong periodic component in chroma → AWB hunting evidence
-        score = 0.0
-        if prominence > 2.0:
-            score += 0.5
-        if periodicity > 4.0:
-            score += 0.5
-
-        return min(score, 1.0), periodicity, chroma_std
-
-    def _ae_hunting(self, features: FeatureVector) -> float:
-        """Score low-frequency periodic luma oscillation (AE hunting).
-
-        Complements the illuminant detector by targeting slow oscillation
-        below the expected mains-beat frequencies.  If the dominant luminance
-        frequency is above ``ae_max_frequency`` it is left to the illuminant
-        detector.
-        """
-        freq = features.frequency
-
-        # Only flag if the dominant frequency is low (AE hunting range)
-        if freq.dominant_frequency <= 0 or freq.dominant_frequency > self.ae_max_frequency:
-            return 0.0
-
-        # Require meaningful prominence and periodicity
-        score = 0.0
-        if freq.peak_prominence > 2.0:
-            score += 0.5
-        if freq.peak_to_median_ratio > 4.0:
-            score += 0.5
-
-        return min(score, 1.0)
+        chroma_magnitude = np.sqrt(chroma_a**2 + chroma_b**2)
+        chroma_variance = float(np.std(chroma_magnitude))
+        spectrum = FrequencyAnalyzer.compute(chroma_magnitude, features.fps)
+        return (
+            spectrum.peak_prominence,
+            spectrum.peak_to_median_ratio,
+            chroma_variance,
+        )
 
     @staticmethod
     def _luma_chroma_decorrelation(features: FeatureVector) -> float:
@@ -148,18 +134,14 @@ class AWBDetector(BaseDetector):
         chroma_b = np.asarray(features.chroma_b, dtype=np.float32)
 
         if luma.size < 4 or luma.size != chroma_a.size:
-            return 0.5  # insufficient data → neutral prior
+            return _NEUTRAL_DECORRELATION
 
-        chroma_mag = np.sqrt(chroma_a**2 + chroma_b**2)
+        chroma_magnitude = np.sqrt(chroma_a**2 + chroma_b**2)
+        if float(np.std(luma)) < 1e-6 or float(np.std(chroma_magnitude)) < 1e-6:
+            return _NEUTRAL_DECORRELATION
 
-        luma_std = float(np.std(luma))
-        chroma_std = float(np.std(chroma_mag))
+        correlation = float(np.corrcoef(luma, chroma_magnitude)[0, 1])
+        if not np.isfinite(correlation):
+            return _NEUTRAL_DECORRELATION
 
-        if luma_std < 1e-6 or chroma_std < 1e-6:
-            return 0.5  # flat signal → neutral prior
-
-        corr = float(np.corrcoef(luma, chroma_mag)[0, 1])
-        if not np.isfinite(corr):
-            return 0.5
-
-        return 1.0 - abs(corr)
+        return 1.0 - abs(correlation)

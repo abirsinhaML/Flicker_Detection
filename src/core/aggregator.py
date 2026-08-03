@@ -92,15 +92,6 @@ class DetectionAggregator:
         return metrics
 
     @staticmethod
-    def detector_max_scores(windows: Sequence[WindowMetrics]) -> dict[str, float]:
-        """Return each detector's strongest normalized evidence across windows."""
-        maximums: dict[str, float] = {}
-        for window in windows:
-            for name, score in window.detector_scores.items():
-                maximums[name] = max(maximums.get(name, 0.0), score)
-        return maximums
-
-    @staticmethod
     def _validate_weight(weight: float) -> float:
         if not isfinite(weight) or weight < 0.0:
             raise ValueError("detector weights must be finite and non-negative")

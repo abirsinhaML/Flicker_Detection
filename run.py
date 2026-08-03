@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Convenience wrapper: run the detector on the reference manifest.
+"""Convenience wrapper: run the detector on the pinned reference manifest.
+
+Videos are read from S3, so AWS credentials must be present in the environment
+(or a profile passed through as --aws-profile).  To score a live bucket listing
+instead of this snapshot, call main.py with --s3-prefix.
 
 Usage:
     python run.py                       # process full manifest

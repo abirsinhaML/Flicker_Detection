@@ -15,13 +15,19 @@ from src.features.frequency import FrequencyAnalyzer
 
 @dataclass(slots=True)
 class RollingBandMetrics:
-    """Measurements characterizing horizontal bands and their vertical motion."""
+    """Measurements characterizing horizontal bands and their vertical motion.
+
+    ``horizontal_coherence`` is a self-check on the band model rather than
+    evidence of flicker: it reports how equally the frame's vertical slices agree
+    on the per-row brightness change.
+    """
 
     edge_energy: float
     dominant_band_strength: float
     vertical_velocity: float
     position_variance: float
     temporal_periodicity: float
+    horizontal_coherence: float = 1.0
 
 
 class RollingBandDetector(BaseDetector):
@@ -67,7 +73,69 @@ class RollingBandDetector(BaseDetector):
             else 0.0,
             position_variance=float(np.var(positions)),
             temporal_periodicity=frequency.peak_to_median_ratio,
+            # The luminance flicker frequency, not this detector's edge-energy
+            # frequency: edge energy oscillates at a harmonic of the band drift,
+            # and projecting onto it would land on a bin holding no band energy.
+            horizontal_coherence=self._horizontal_coherence(
+                features.column_band_profiles,
+                features.fps,
+                max(features.frequency.dominant_frequency, 0.0),
+            ),
         )
+
+    @staticmethod
+    def _horizontal_coherence(
+        column_band_profiles: np.ndarray,
+        fps: float,
+        flicker_frequency: float,
+    ) -> float:
+        """Return how consistently vertical slices see the same banding per row.
+
+        A rolling shutter exposes whole sensor rows in sequence, so its banding is
+        imposed after the lens has projected the scene.  Fisheye distortion
+        therefore bends scene content but leaves the bands straight, and every
+        slice of the frame should agree on the brightness of each row.
+
+        The comparison is made only at the flicker frequency.  A raw
+        frame-to-frame difference is dominated by scene motion, which under a
+        fisheye is wildly different at the left and right edges during head
+        rotation -- measuring that would report low coherence for every moving
+        video regardless of its banding.  Projecting each row's time series onto
+        the dominant frequency keeps the periodic component and rejects the
+        broadband motion around it.
+
+        Low coherence with real periodic flicker present means the frame was
+        geometrically remapped -- dewarped, rectilinearized, or electronically
+        stabilized -- which bends the bands and invalidates this detector's
+        model.  Reporting it turns a silent underdetection into a visible number.
+        """
+        profiles = np.asarray(column_band_profiles, dtype=np.float32)
+        if profiles.ndim != 3 or profiles.shape[0] < 2 or profiles.shape[1] < 2:
+            return 1.0
+        if flicker_frequency <= 0.0 or not isfinite(fps) or fps <= 0.0:
+            # No periodic component: there is no band whose shape to check.
+            return 1.0
+
+        # Complex amplitude of each row's oscillation at the flicker frequency.
+        # Phase matters as much as magnitude: a bent band shows a row-dependent
+        # phase shift between slices even when the amplitudes agree.
+        frames = profiles.shape[1]
+        times = np.arange(frames, dtype=np.float64) / fps
+        kernel = np.exp(-2j * np.pi * flicker_frequency * times)
+        centered = profiles - profiles.mean(axis=1, keepdims=True)
+        amplitudes = np.tensordot(centered.astype(np.float64), kernel, axes=([1], [0]))
+
+        coherences = []
+        for first in range(len(amplitudes)):
+            for second in range(first + 1, len(amplitudes)):
+                left, right = amplitudes[first], amplitudes[second]
+                norm = np.linalg.norm(left) * np.linalg.norm(right)
+                if norm < 1e-12:
+                    continue
+                coherences.append(abs(np.vdot(left, right)) / norm)
+        if not coherences:
+            return 1.0
+        return float(np.clip(np.mean(coherences), 0.0, 1.0))
 
     @staticmethod
     def _validate_profiles(row_profiles: np.ndarray) -> np.ndarray:

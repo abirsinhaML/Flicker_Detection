@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "av>=17.1.0",
+    "boto3>=1.43.62",
     "numpy>=2.2.6",
     "opencv-python-headless>=5.0.0.93",
+    "openpyxl>=3.1.5",
     "pandas>=2.3.3",
     "pyyaml>=6.0.3",
     "scipy>=1.15.3",

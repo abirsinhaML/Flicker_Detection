@@ -13,14 +13,18 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class ManifestEntry:
-    """
-    Represents one row in the dataset manifest.
+    """One video to process, identified by a durable source URI.
+
+    ``source_uri`` is either an ``s3://bucket/key`` URI (resolved to a
+    short-lived signed URL inside the worker, immediately before decode) or any
+    local path / URL FFmpeg accepts directly.  No long-lived signed URL is ever
+    stored on disk or carried across processes.
     """
 
     key: str
-    size_bytes: int
-    last_modified: datetime
-    presigned_url: str
+    source_uri: str
+    size_bytes: int | None = None
+    last_modified: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -50,12 +54,19 @@ class VideoWindow:
 
 @dataclass(slots=True)
 class SignalFeatures:
-    """Detector-independent signals extracted from one :class:`VideoWindow`."""
+    """Detector-independent signals extracted from one :class:`VideoWindow`.
+
+    ``column_band_profiles`` holds the same row profiles measured over vertical
+    slices of the frame, used to test that banding really is horizontal.
+    ``valid_fraction`` records how much of the frame carried live pixels.
+    """
 
     luma: np.ndarray
     chroma_a: np.ndarray
     chroma_b: np.ndarray
     row_profiles: np.ndarray
+    column_band_profiles: np.ndarray
+    valid_fraction: float = 1.0
 
 
 @dataclass(slots=True)
@@ -66,10 +77,11 @@ class FeatureVector:
     chroma_a: np.ndarray
     chroma_b: np.ndarray
     row_profiles: np.ndarray
+    column_band_profiles: np.ndarray
     fps: float
     temporal: TemporalSummary
     frequency: FrequencyFeatures
-
+    valid_fraction: float = 1.0
 
 
 @dataclass(slots=True)
@@ -96,3 +108,6 @@ class VideoResult:
     detector_scores: dict[str, float]
     processing_time: float
     detector_version: str
+    # Diagnostics describing measurement conditions rather than flicker evidence.
+    horizontal_coherence: float = 1.0
+    valid_fraction: float = 1.0
