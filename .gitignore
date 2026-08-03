@@ -25,9 +25,14 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Project outputs
-output/
-reports/
+# Project outputs. Ignore the contents but not the directories, so the two
+# required deliverable artifacts can be re-included below -- git will not
+# descend into a directory ignored as `output/`, which would make the
+# negations beneath it dead letters.
+output/*
+!output/reference_flag_manifest.csv
+reports/*
+!reports/calibration_report.md
 results/
 
 # Video files (avoid committing large media)
@@ -35,6 +40,13 @@ results/
 *.avi
 *.mov
 *.mkv
+
+# The delivery spreadsheet carries 7-day presigned S3 URLs in its
+# `presigned_url_7day` column. Committing it would write signed URLs into git
+# history permanently, where deleting the file later does not remove them.
+# scripts/extract_labels.py distils it to data/reference_labels.csv, which holds
+# only keys and labels and is what belongs in the repo.
+data/*.xlsx
 
 # Lock files are committed (uv.lock), but allow ignoring pip
 pip-log.txt
