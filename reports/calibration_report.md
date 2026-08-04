@@ -4,16 +4,16 @@ The reference set was split deterministically by SHA-256 video key, with 80% use
 
 ## Final boundaries
 
-- None: score < 0.5042
-- Mild: 0.5042 ≤ score < 0.5452
-- Extreme: score ≥ 0.5452
+- None: score < 0.3365
+- Mild: 0.3365 ≤ score < 0.4666
+- Extreme: score ≥ 0.4666
 
 ## Held-out evaluation
 
 - Training videos: 21
 - Validation videos: 4
-- Accuracy: 0.500
-- Macro F1: 0.333
+- Accuracy: 1.000
+- Macro F1: 0.667
 
 ## Confusion matrix
 
@@ -22,5 +22,5 @@ Rows are reference labels; columns are predicted bands.
 | Actual / Predicted | none | mild | extreme |
 | --- | ---: | ---: | ---: |
 | none | 0 | 0 | 0 |
-| mild | 0 | 1 | 2 |
+| mild | 0 | 3 | 0 |
 | extreme | 0 | 0 | 1 |

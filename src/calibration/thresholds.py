@@ -150,29 +150,29 @@ class AWBNormalizer:
 
 @dataclass(frozen=True, slots=True)
 class RollingBandNormalizer:
-    """Map rolling-band measurements to bounded evidence using config scales."""
+    """Grade banding evidence: how strong, how band-like, how wide.
 
-    band_strength_reference: float
-    velocity_reference: float
-    position_variance_reference: float
-    periodicity_reference: float
+    The three factors multiply, following the same logic as
+    :class:`IlluminantNormalizer`.  Banding requires all of them, and averaging
+    would let any one alone carry a video to a middling score: a faint but
+    textbook-shaped band is invisible, a large swing with unrelated per-row phase
+    is motion, and structure confined to part of the width is scene content
+    rather than a sensor-wide readout artifact.
+
+    Only ``band_amplitude`` needs a fitted scale.  Phase linearity and horizontal
+    coherence are correlation-like and already bounded to ``[0, 1]``, which keeps
+    the number of free parameters low -- worth caring about when the reference set
+    is 25 videos.
+    """
+
+    band_amplitude_reference: float
 
     def __post_init__(self) -> None:
-        _validate_references(
-            band_strength_reference=self.band_strength_reference,
-            velocity_reference=self.velocity_reference,
-            position_variance_reference=self.position_variance_reference,
-            periodicity_reference=self.periodicity_reference,
-        )
+        _validate_references(band_amplitude_reference=self.band_amplitude_reference)
 
     def __call__(self, metrics: object) -> float:
         if not isinstance(metrics, RollingBandMetrics):
             raise TypeError("RollingBandNormalizer requires RollingBandMetrics")
 
-        components = (
-            metrics.dominant_band_strength / self.band_strength_reference,
-            abs(metrics.vertical_velocity) / self.velocity_reference,
-            metrics.position_variance / self.position_variance_reference,
-            metrics.temporal_periodicity / self.periodicity_reference,
-        )
-        return _mean([min(max(component, 0.0), 1.0) for component in components])
+        severity = soft_saturate(metrics.band_amplitude, self.band_amplitude_reference)
+        return severity * metrics.phase_linearity * metrics.horizontal_coherence

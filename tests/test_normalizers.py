@@ -194,26 +194,57 @@ class AWBNormalizerTests(unittest.TestCase):
             )
 
 
+def _band_metrics(**overrides: float) -> RollingBandMetrics:
+    defaults: dict[str, float] = {
+        "band_amplitude": 0.0,
+        "phase_linearity": 0.0,
+        "band_cycles_per_frame": 0.0,
+        "drift_velocity": 0.0,
+        "horizontal_coherence": 1.0,
+    }
+    return RollingBandMetrics(**{**defaults, **overrides})
+
+
 class RollingBandNormalizerTests(unittest.TestCase):
-    def test_still_bounded_and_rejects_foreign_metrics(self) -> None:
-        normalizer = RollingBandNormalizer(
-            band_strength_reference=10.0,
-            velocity_reference=30.0,
-            position_variance_reference=50.0,
-            periodicity_reference=8.0,
+    def setUp(self) -> None:
+        self.normalizer = RollingBandNormalizer(band_amplitude_reference=0.02)
+
+    def test_scores_half_the_bounded_factors_at_the_reference_swing(self) -> None:
+        score = self.normalizer(
+            _band_metrics(band_amplitude=0.02, phase_linearity=1.0, horizontal_coherence=1.0)
         )
-        saturated = normalizer(
-            RollingBandMetrics(
-                edge_energy=1.0,
-                dominant_band_strength=1e6,
-                vertical_velocity=-1e6,
-                position_variance=1e6,
-                temporal_periodicity=1e6,
-            )
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_a_strong_swing_with_unrelated_row_phase_scores_near_zero(self) -> None:
+        """Motion: large row-profile movement that is not a band."""
+        score = self.normalizer(
+            _band_metrics(band_amplitude=0.5, phase_linearity=0.02, horizontal_coherence=0.05)
         )
-        self.assertEqual(saturated, 1.0)
+        self.assertLess(score, 0.01)
+
+    def test_a_textbook_band_with_no_swing_scores_near_zero(self) -> None:
+        score = self.normalizer(
+            _band_metrics(band_amplitude=1e-5, phase_linearity=1.0, horizontal_coherence=1.0)
+        )
+        self.assertLess(score, 0.01)
+
+    def test_evidence_confined_to_part_of_the_width_is_discounted(self) -> None:
+        wide = self.normalizer(
+            _band_metrics(band_amplitude=0.1, phase_linearity=0.9, horizontal_coherence=0.95)
+        )
+        narrow = self.normalizer(
+            _band_metrics(band_amplitude=0.1, phase_linearity=0.9, horizontal_coherence=0.2)
+        )
+        self.assertGreater(wide, narrow)
+
+    def test_stays_bounded_and_rejects_foreign_metrics(self) -> None:
+        saturated = self.normalizer(
+            _band_metrics(band_amplitude=1e6, phase_linearity=1.0, horizontal_coherence=1.0)
+        )
+        self.assertLessEqual(saturated, 1.0)
+        self.assertGreater(saturated, 0.99)
         with self.assertRaises(TypeError):
-            normalizer(_awb_metrics())
+            self.normalizer(_awb_metrics())
 
 
 if __name__ == "__main__":

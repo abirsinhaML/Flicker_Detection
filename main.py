@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from src.calibration.discrimination import measure_discrimination, write_discrimination_report
 from src.calibration.evaluation import calibrate, write_calibration_report
 from src.calibration.thresholds import (
     AWBNormalizer,
@@ -580,6 +581,7 @@ def main() -> None:
     parser.add_argument("--aws-region", help="Bucket region for SigV4 signing")
     parser.add_argument("--calibrate-labels", help="CSV with video_key,label reference labels")
     parser.add_argument("--calibration-report", default="reports/calibration_report.md")
+    parser.add_argument("--discrimination-report", default="reports/discrimination_report.md")
     arguments = parser.parse_args()
     listing_requested = arguments.s3_prefix is not None
     input_count = (
@@ -597,6 +599,17 @@ def main() -> None:
     config = _apply_aws_overrides(load_config(arguments.config), arguments)
     try:
         if arguments.calibrate_labels:
+            # Rank every signal before fitting anything. A threshold fit on an
+            # inverted score still reports a number, so the ordering check has to
+            # come first and be visible next to the fitted bands.
+            discrimination = measure_discrimination(arguments.output, arguments.calibrate_labels)
+            write_discrimination_report(discrimination, arguments.discrimination_report)
+            for measured in discrimination:
+                print(
+                    f"  {measured.signal:>22} spearman={measured.spearman:+.3f} "
+                    f"AUC={measured.auc_extreme_vs_none:.3f}"
+                    f"{'   INVERTED' if measured.is_inverted else ''}"
+                )
             result = calibrate(arguments.output, arguments.calibrate_labels)
             write_calibration_report(result, arguments.calibration_report)
             print(
