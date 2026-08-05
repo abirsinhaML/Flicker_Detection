@@ -2,21 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from src.features.frequency import FrequencyFeatures
+    from src.features.temporal import TemporalSummary
 
 
 @dataclass(slots=True)
 class ManifestEntry:
-    """
-    Represents one row in the dataset manifest.
+    """One video to process, identified by a durable source URI.
+
+    ``source_uri`` is either an ``s3://bucket/key`` URI (resolved to a
+    short-lived signed URL inside the worker, immediately before decode) or any
+    local path / URL FFmpeg accepts directly.  No long-lived signed URL is ever
+    stored on disk or carried across processes.
     """
 
     key: str
-    size_bytes: int
-    last_modified: datetime
-    presigned_url: str
+    source_uri: str
+    size_bytes: int | None = None
+    last_modified: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -45,47 +53,61 @@ class VideoWindow:
 
 
 @dataclass(slots=True)
-class FeatureVector:
-    """
-    Signals extracted from one VideoWindow.
+class SignalFeatures:
+    """Detector-independent signals extracted from one :class:`VideoWindow`.
+
+    ``column_band_profiles`` holds the same row profiles measured over vertical
+    slices of the frame, used to test that banding really is horizontal.
+    ``valid_fraction`` records how much of the frame carried live pixels.
     """
 
     luma: np.ndarray
     chroma_a: np.ndarray
     chroma_b: np.ndarray
-    row_profile: np.ndarray
+    row_profiles: np.ndarray
+    column_band_profiles: np.ndarray
+    valid_fraction: float = 1.0
 
 
 @dataclass(slots=True)
-class VideoWindowResult:
-    """
-    Flicker assessment for a single temporal VideoWindow.
-    """
+class FeatureVector:
+    """Raw signals and shared derived features for one video window."""
 
-    start_time: float
-    end_time: float
+    luma: np.ndarray
+    chroma_a: np.ndarray
+    chroma_b: np.ndarray
+    row_profiles: np.ndarray
+    column_band_profiles: np.ndarray
+    fps: float
+    temporal: TemporalSummary
+    frequency: FrequencyFeatures
+    valid_fraction: float = 1.0
 
-    illuminant_score: float
-    awb_score: float
-    banding_score: float
 
-    confidence: float
+@dataclass(slots=True)
+class VideoMetrics:
+    """Summary of flicker evidence across all sampled video windows."""
+
+    max_score: float
+    mean_score: float
+    positive_windows: int
+    total_windows: int
 
 
 @dataclass(slots=True)
 class VideoResult:
-    """
-    Final assessment for one video.
-    """
+    """Final output for one processed video."""
 
     video_key: str
-
     flicker_score: float
-
-    severity: str
-
+    has_flicker: bool
+    severity_band: str
+    route: str
     confidence: float
-
     worst_segment: tuple[float, float]
-
+    detector_scores: dict[str, float]
+    processing_time: float
     detector_version: str
+    # Diagnostics describing measurement conditions rather than flicker evidence.
+    horizontal_coherence: float = 1.0
+    valid_fraction: float = 1.0
