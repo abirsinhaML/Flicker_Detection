@@ -233,11 +233,14 @@ def run_s3_prefix(
     The listing streams, so a prefix holding the full corpus never has to be
     materialized before work starts.
     """
-    catalog = S3Settings.from_config(config).catalog(listing_root)
-    catalog.verify_access()
-    logger.info("Listing videos under s3://%s/%s", catalog.bucket, catalog.prefix)
+    catalogs = S3Settings.from_config(config).catalogs(listing_root)
+    for catalog in catalogs:
+        catalog.verify_access()
+        logger.info("Listing videos under s3://%s/%s", catalog.bucket, catalog.prefix)
+    
+    entries = chain.from_iterable(catalog.list_entries() for catalog in catalogs)
     run_batch(
-        catalog.list_entries(),
+        entries,
         output_path,
         config,
         limit=limit,
@@ -362,14 +365,16 @@ def snapshot_s3_manifest(
     Pinning the listing this way makes a run reproducible: the same manifest
     yields the same work set even as the bucket gains objects.
     """
-    catalog = S3Settings.from_config(config).catalog(listing_root)
-    catalog.verify_access()
-    written = write_manifest(catalog.list_entries(limit=limit), manifest_path)
+    catalogs = S3Settings.from_config(config).catalogs(listing_root)
+    for catalog in catalogs:
+        catalog.verify_access()
+    
+    entries = chain.from_iterable(catalog.list_entries(limit=limit) for catalog in catalogs)
+    written = write_manifest(entries, manifest_path)
     logger.info(
-        "Wrote %d entries from s3://%s/%s to %s",
+        "Wrote %d entries from %d prefixes to %s",
         written,
-        catalog.bucket,
-        catalog.prefix,
+        len(catalogs),
         manifest_path,
     )
     return written

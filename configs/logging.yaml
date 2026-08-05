@@ -12,7 +12,13 @@ handlers:
     level: INFO
     formatter: standard
     stream: ext://sys.stderr
+  file:
+    class: logging.FileHandler
+    level: INFO
+    formatter: standard
+    filename: output/detector.log
+    mode: a
 
 root:
   level: INFO
-  handlers: [console]
+  handlers: [console, file]
