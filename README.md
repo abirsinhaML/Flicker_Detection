@@ -77,37 +77,47 @@ uv run python main.py path/to/local.mp4 --output output/flag_manifest.csv
 ## Hardware decode
 
 Decoding is the entire cost of this pipeline: the sources are 3840×2880 at 29.97
-fps while the analysed signal is 320×180, so per 3-second window software decode
-spends 4.08 s of CPU against 0.24 s for every detector and feature combined.
-NVDEC does the same window for 0.54 s.
-
-`decode.backend` defaults to `auto`, which uses NVDEC when the driver, codec, and
-resolution allow and falls back to software otherwise — an unsupported profile or
-an exhausted GPU slows a batch down, it never drops videos from it. The chosen
-backend is logged per video and can be forced from the command line:
+fps while the analysed signal is 320×180, so a window spends an order of
+magnitude more CPU being decoded than being measured. `decode.backend` defaults
+to `auto`, which uses NVDEC when the driver, codec, and resolution allow and
+falls back to software otherwise — an unsupported profile or an exhausted GPU
+slows a batch down, it never drops videos from it. The backend actually used is
+logged per video, and can be forced:
 
 ```bash
-uv run python main.py --s3-prefix --decode-backend cuda --workers 8 --resume
+uv run python main.py --s3-prefix --decode-backend cuda --workers 16 --resume
 ```
 
-`decode.gpu_resize` decides whether NVDEC also performs the downscale. That is
-the difference between 2.24 s and 0.54 s of CPU per window, but it substitutes
-NVDEC's scaler for swscale's. Since `decision.mild_threshold` and
-`decision.extreme_threshold` are fitted against measured scores, confirm the
-backends agree on real footage before switching a batch:
+Measured on 24 real corpus videos through this path, on a 16-core machine with
+an A10G:
+
+| run | wall | user CPU |
+|---|---|---|
+| `--decode-backend cpu --workers 16` | 415.6 s | 6173.5 s |
+| `--decode-backend cuda --workers 16` | 230.8 s | 1936.7 s |
+| `--decode-backend cuda --workers 32` | 211.1 s | 1954.9 s |
+
+1.8× the throughput for 3.2× less CPU, no fallbacks, and no video changing
+severity band or route (worst `flicker_score` difference 0.00055).
+
+**Size workers for NVDEC, not for cores.** During the 16-worker GPU run the
+decode engine was pinned at 100% while the SMs idled near 40% and VRAM held 6 GB
+of 23 GB (~375 MB per worker). Doubling to 32 workers therefore bought only 9%.
+Beyond saturation, more workers buy contention.
+
+`decode.gpu_resize` moves the downscale into NVDEC too and cuts CPU further, but
+its scaler is not swscale's. **It is not safe at the current thresholds:** of the
+first three corpus videos tried, one moved from 0.352 to 0.310, crossing
+`mild_threshold` and turning `review` into `accept`. Enabling it means re-fitting
+`decision` against GPU-decoded scores. Check any change first:
 
 ```bash
 uv run python scripts/compare_decode_backends.py \
-  s3://humyn-data-partners-prod/.../clip.mp4 --config configs/detector_1.yaml
+  s3://bucket/prefix/clip.mp4 --config configs/detector_1.yaml
 ```
 
 The script scores each video on both backends, refuses to fall back silently,
 and exits non-zero if any video changes severity band or route.
-
-**Worker count changes with the backend.** Under NVDEC the bottleneck is no
-longer CPU cores but the GPU's decode engines, its memory (each worker holds its
-own CUDA context), and S3 egress. A `--workers` value tuned for software decode
-will be wrong; re-measure it.
 
 ## Resuming
 

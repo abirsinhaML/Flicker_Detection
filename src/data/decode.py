@@ -75,26 +75,24 @@ class DecodePolicy:
     FFmpeg choose; frame threading is what makes software 4K decode tolerable
     and is off by default in PyAV.
 
-    ``gpu_resize`` decides where the 3840x2880 -> 320x180 downscale happens, and
-    it trades throughput against exactness rather than being a pure win.  Per 3s
-    window of 4K, measured on this corpus's frame size:
+    ``gpu_resize`` decides where the 3840x2880 -> 320x180 downscale happens.  It
+    defaults to off, and the reason is measured rather than cautious.
 
-        software decode + swscale        4.08 s CPU
-        NVDEC + swscale                  2.24 s CPU
-        NVDEC + in-decoder downscale     0.54 s CPU
+    Off, the downscale stays in swscale, so the only difference from the
+    software path is the decode itself -- and NVDEC implements the same
+    normative H.264 reconstruction.  Across 24 real corpus videos scored both
+    ways, the worst ``flicker_score`` difference was 0.00055 and no video
+    changed severity band or route.  That is safe against thresholds fitted at
+    0.328 and 0.51.
 
-    Off, the downscale stays in swscale and the result is bit-identical to the
-    software path wherever chroma is trivial -- NVDEC implements the same
-    normative H.264 reconstruction.  What residual there is comes from NV12 and
-    YUV420P taking different swscale chroma paths, not from the decode.
-
-    On, NVDEC also resamples, which its own scaler does differently from
-    swscale.  Measured against the software path: no change worth reporting on a
-    clip carrying a genuine rolling band (``flicker_score`` +0.0013, worst
-    channel 0.0077), against decision boundaries at 0.328 and 0.51.  The drift
-    is largest where a detector has no real signal to measure and is reporting
-    its own noise floor.  Validate on real footage with
-    ``scripts/compare_decode_backends.py`` before turning it on for a batch.
+    On, NVDEC resamples too, and its scaler is not swscale's.  A 16x vertical
+    reduction is where they disagree most, which is exactly where the banding
+    evidence lives.  On real footage this is *not* safe: one of the first three
+    corpus videos tried moved from 0.352 to 0.310, crossing the mild threshold
+    and changing its route from ``review`` to ``accept`` -- a flickering video
+    passing unseen, which is the wrong direction for a QC gate to fail.  Turning
+    it on means re-fitting ``decision`` against GPU-decoded scores.  Check any
+    change with ``scripts/compare_decode_backends.py`` first.
     """
 
     backend: str = "auto"

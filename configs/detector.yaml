@@ -36,23 +36,20 @@ decode:
   # profile or an exhausted GPU must slow the batch down, not drop videos from
   # it. Set false only to prove the hardware path is actually being taken.
   allow_fallback: true
-  # Where the 3840x2880 -> 320x180 downscale happens. Measured CPU per 3s window
-  # of 4K: software decode + swscale 4.08s, NVDEC + swscale 2.24s, NVDEC with
-  # in-decoder downscale 0.54s.
+  # Where the 3840x2880 -> 320x180 downscale happens.
   #
-  #   false -> NVDEC decodes, swscale downscales. Bit-identical to the software
-  #            path wherever chroma is trivial, because NVDEC implements the
-  #            same normative H.264 reconstruction; scores stay comparable with
-  #            every result already in output/. ~1.8x less CPU.
-  #   true  -> NVDEC downscales too, so full-res frames never cross PCIe.
-  #            ~7.6x less CPU. Its scaler is not swscale's: on a clip with a
-  #            genuine rolling band that moved flicker_score by +0.0013 (worst
-  #            channel 0.0077) against boundaries at 0.328 and 0.51. Drift is
-  #            largest where a detector has no real signal and is reporting its
-  #            own noise floor.
+  #   false -> NVDEC decodes, swscale downscales. Only the decode changes, and
+  #            NVDEC implements the same normative H.264 reconstruction. Across
+  #            24 real corpus videos the worst flicker_score difference was
+  #            0.00055 and no video changed severity band or route.
+  #   true  -> NVDEC downscales too, so full-res frames never cross PCIe, and
+  #            per-window CPU drops further. NOT SAFE at the current thresholds:
+  #            of the first three corpus videos tried, one moved 0.352 -> 0.310,
+  #            crossing mild_threshold and changing review -> accept. That is a
+  #            flickering video passing unseen. Enabling it means re-fitting
+  #            `decision` against GPU-decoded scores.
   #
-  # Validate on real corpus videos with scripts/compare_decode_backends.py
-  # before switching a batch, and re-run calibration if the drift matters.
+  # Check any change with scripts/compare_decode_backends.py before a batch.
   gpu_resize: false
 
 # NOTE ON WORKER COUNT: with NVDEC the bottleneck stops being CPU cores and
