@@ -6,11 +6,57 @@ Usage:
 """
 
 import argparse
+import contextlib
 import csv
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 import yaml
+
+# How many of the most recent completions define the "current" rate. Averaging
+# over the whole run hides a slowdown, and hides the speedup after a config
+# change too, because early hours keep their weight forever.
+RECENT_WINDOW = 200
+
+
+def print_throughput(completions: list[datetime], processing_times: list[float]) -> None:
+    """Report how fast rows are being produced, from their completion stamps.
+
+    Rows written before the ``completed_at`` column existed carry no stamp and
+    are skipped, so an older manifest reports on whatever part of itself is
+    timestamped rather than reporting nothing.
+    """
+    if len(completions) < 2:
+        print("\nThroughput: needs at least two timestamped rows "
+              "(older rows predate the completed_at column).")
+        return
+
+    completions.sort()
+    span_hours = (completions[-1] - completions[0]).total_seconds() / 3600.0
+    recent = completions[-RECENT_WINDOW:]
+    recent_hours = (recent[-1] - recent[0]).total_seconds() / 3600.0
+
+    print(f"\n{'Throughput':^80}")
+    print(f"{'-' * 80}")
+    print(f"  Timestamped rows:   {len(completions):,}")
+    print(f"  First completion:   {completions[0].isoformat()}")
+    print(f"  Last completion:    {completions[-1].isoformat()}")
+    print(f"  Elapsed:            {span_hours:.2f} h")
+    if span_hours > 0:
+        overall = len(completions) / span_hours
+        print(f"  Overall rate:       {overall:,.1f} videos/hour")
+    if len(recent) > 1 and recent_hours > 0:
+        print(f"  Recent rate:        {len(recent) / recent_hours:,.1f} videos/hour "
+              f"(last {len(recent)})")
+    if processing_times:
+        mean_seconds = sum(processing_times) / len(processing_times)
+        print(f"  Mean per video:     {mean_seconds:.1f} s of worker time")
+        # Wall-clock rate over worker-time per video is the effective parallelism
+        # actually achieved, which is the number worth comparing to --workers.
+        if span_hours > 0:
+            achieved = (len(completions) / span_hours) * mean_seconds / 3600.0
+            print(f"  Effective workers:  {achieved:.1f} (vs the --workers you set)")
 
 
 def extract_prefix_from_key(key: str, prefixes: list[str]) -> str:
@@ -46,7 +92,9 @@ def main():
 
     # Count by prefix and status
     stats = defaultdict(lambda: {'ok': 0, 'error': 0, 'total': 0})
-    
+    completions: list[datetime] = []
+    processing_times: list[float] = []
+
     output_path = Path(args.output_csv)
     if not output_path.exists():
         print(f"Output file not found: {args.output_csv}")
@@ -68,7 +116,17 @@ def main():
                 stats[prefix]['ok'] += 1
             elif status == 'error':
                 stats[prefix]['error'] += 1
-    
+
+            # A malformed stamp costs that row from the rate, not the report.
+            stamp = (row.get('completed_at') or '').strip()
+            if stamp:
+                with contextlib.suppress(ValueError):
+                    completions.append(datetime.fromisoformat(stamp))
+            elapsed = (row.get('processing_time_seconds') or '').strip()
+            if elapsed:
+                with contextlib.suppress(ValueError):
+                    processing_times.append(float(elapsed))
+
     # Print summary
     print(f"\n{'=' * 80}")
     print(f"{'Prefix Progress Summary':^80}")
@@ -117,6 +175,8 @@ def main():
         print(f"  - Success rate: {total_pct:.1f}%")
         if total_error > 0:
             print(f"  - Failed videos: {total_error} (will be retried with --resume)")
+
+    print_throughput(completions, processing_times)
 
 
 if __name__ == '__main__':

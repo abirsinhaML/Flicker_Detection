@@ -146,9 +146,9 @@ awb_detector:
 aggregation:
   positive_threshold: 0.5
   weights:
-    IlluminantDetector: 0.30
-    RollingBandDetector: 0.50
-    AWBDetector: 0.20
+    IlluminantDetector: 0.10
+    RollingBandDetector: 0.65
+    AWBDetector: 0.25
   illuminant_normalization:
     prominence_reference: 4.0
     periodicity_reference: 8.0
@@ -177,7 +177,7 @@ decision:
   # The clean/mild boundary sits in a genuine gap: no reference video scores
   # between 0.3195 (highest clean) and 0.3365 (lowest mild), so the midpoint is
   # the most defensible point and separates those two classes perfectly.
-  mild_threshold: 0.328
+  mild_threshold: 0.365
   # Placed just above 004_976 (0.5046), which reviewing the footage directly
   # judged mild despite the reference sheet's orange-vs-red ambiguity. This
   # deliberately disagrees with the sheet on four videos it marks extreme
@@ -185,4 +185,4 @@ decision:
   # of `reject`. That is the safe direction for a QC gate: a human still sees
   # them, whereas an over-called reject is acted on unseen. Worth revisiting
   # once the larger hand-labelled set exists.
-  extreme_threshold: 0.51
+  extreme_threshold: 0.59

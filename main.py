@@ -8,6 +8,7 @@ import logging
 import os
 from collections.abc import Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from datetime import datetime, timezone
 from itertools import chain, islice
 from pathlib import Path
 from time import perf_counter
@@ -41,7 +42,7 @@ from src.utils.logger import configure_logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 OUTPUT_FIELDS = (
     "schema_version",
     "status",
@@ -61,6 +62,9 @@ OUTPUT_FIELDS = (
     "valid_fraction",
     "processing_time_seconds",
     "detector_version",
+    # Appended, so an older manifest still parses and resumes; rows written
+    # before this column existed simply carry an empty value.
+    "completed_at",
 )
 
 
@@ -415,6 +419,7 @@ def result_to_row(result: VideoResult) -> dict[str, object]:
         "valid_fraction": result.valid_fraction,
         "processing_time_seconds": result.processing_time,
         "detector_version": result.detector_version,
+        "completed_at": _timestamp(),
     }
 
 
@@ -501,7 +506,18 @@ def _error_row(key: str, error: Exception, config: dict[str, Any]) -> dict[str, 
         "awb_score": "",
         "processing_time_seconds": "",
         "detector_version": config.get("detector_version", ""),
+        "completed_at": _timestamp(),
     }
+
+
+def _timestamp() -> str:
+    """When this row was produced, in UTC.
+
+    Written in the worker as the row is built, so it marks the moment a video
+    finished rather than when the parent got round to flushing it.  UTC keeps
+    the column sortable and immune to the host's timezone.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _horizontal_coherence(results: dict[str, object]) -> float:
