@@ -4,7 +4,7 @@ s3:
   # Remove or comment out prefixes to use the single prefix field instead.
   # Mark completed prefixes with "# done" or comment them out entirely to skip.
   prefixes:
-    - raw/2026-05-08/project-test/
+    - raw/2026-05-08/project-test/6fff9233-e3c5-433e-83be-ee22084dc67b/
     - raw/2026-05-16/mirana_test/
     - raw/2026-05-16/project-test/
     - raw/collector_app/
