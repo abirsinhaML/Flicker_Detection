@@ -41,7 +41,7 @@ def print_throughput(finished: list[tuple[datetime, float | None]]) -> None:
 
     finished.sort(key=lambda entry: entry[0])
     session = [finished[0]]
-    for previous, current in zip(finished, finished[1:]):
+    for previous, current in zip(finished, finished[1:], strict=False):
         if (current[0] - previous[0]).total_seconds() > RUN_GAP_SECONDS:
             session = [current]
         else:
