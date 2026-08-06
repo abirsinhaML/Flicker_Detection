@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from math import isfinite
 from pathlib import Path
 
 import av
+import av.error
 import numpy as np
 
 from src.core.types import VideoMetadata, VideoWindow
+from src.data.decode import DecodePolicy, FrameDecoder, SoftwareDecoder, build_decoder
+
+logger = logging.getLogger(__name__)
 
 _REMOTE_SCHEMES = ("http://", "https://")
 
@@ -35,10 +40,25 @@ class VideoReader:
     range-request-friendly options so that windowed sampling transfers only the
     bytes it analyzes rather than the whole object.  The reader owns an open
     PyAV container and should therefore be used as a context manager.
+
+    ``resize`` given here is the target frame size for every window.  Passing it
+    to the constructor rather than to each :meth:`read_window` call is what lets
+    a hardware decoder apply the scale itself, so full-resolution frames are
+    never copied out of the GPU.  ``read_window`` still accepts a per-call
+    ``resize`` for callers that need a different size, at the cost of a software
+    rescale on top.
     """
 
-    def __init__(self, video_path: str | Path) -> None:
+    def __init__(
+        self,
+        video_path: str | Path,
+        *,
+        decode_policy: DecodePolicy | None = None,
+        resize: tuple[int, int] | None = None,
+    ) -> None:
         self.video_path = str(video_path)
+        self.resize = resize
+        self.decode_policy = decode_policy or DecodePolicy()
         self.container = (
             av.open(self.video_path, options=dict(_HTTP_OPTIONS), timeout=_REMOTE_TIMEOUT)
             if self.is_remote(self.video_path)
@@ -50,11 +70,22 @@ class VideoReader:
             raise ValueError(f"No video stream found in: {self.video_path}")
 
         self.stream = self.container.streams.video[0]
+        self.decoder: FrameDecoder = build_decoder(
+            self.stream,
+            self.decode_policy,
+            resize=resize,
+            source=self.video_path,
+        )
 
     @staticmethod
     def is_remote(video_path: str) -> bool:
         """Return whether FFmpeg will read this source over HTTP."""
         return video_path.lower().startswith(_REMOTE_SCHEMES)
+
+    @property
+    def decode_backend(self) -> str:
+        """Which backend is actually decoding, after any fallback."""
+        return self.decoder.name
 
     def metadata(self) -> VideoMetadata:
         """Return metadata reported by the selected video stream."""
@@ -80,39 +111,26 @@ class VideoReader:
         Seeking starts from a decodable key frame; decoded frames before ``start``
         are discarded so the returned window honors the requested timestamp even
         when the source has sparse key frames or a variable frame rate.  ``resize``
-        is ``(width, height)`` and is performed by FFmpeg/PyAV.
+        is ``(width, height)``; it defaults to the reader's own and is applied by
+        the decoder itself where the backend supports it.
         """
         self._validate_window(start, duration, resize)
-
+        target = resize if resize is not None else self.resize
         end = start + duration
-        self.container.seek(
-            int(start / self.stream.time_base),
-            stream=self.stream,
-            backward=True,
-            any_frame=False,
-        )
 
-        frames: list[np.ndarray] = []
-        for frame in self.container.decode(self.stream):
-            timestamp = frame.time
-            if timestamp is None:
-                continue
+        try:
+            frames = self._decode_window(start, end, target)
+        except av.error.FFmpegError as error:
+            # A hardware decoder can fail on a stream that probed as supported:
+            # an unexpected profile, exhausted GPU memory, or one NVDEC session
+            # too many.  Retry the window in software rather than lose the video.
+            if not self._can_downgrade():
+                raise
+            logger.warning("Hardware decode failed (%s); retrying window in software", error)
+            self._downgrade_to_software()
+            frames = self._decode_window(start, end, target)
 
-            if timestamp < start:
-                continue
-            if timestamp >= end:
-                break
-
-            if resize is not None:
-                frame = frame.reformat(
-                    width=resize[0],
-                    height=resize[1],
-                    format="rgb24",
-                )
-
-            frames.append(frame.to_ndarray(format="rgb24"))
-
-        frame_width, frame_height = resize or (self.stream.width, self.stream.height)
+        frame_width, frame_height = target or (self.stream.width, self.stream.height)
         rgb_frames = (
             np.stack(frames)
             if frames
@@ -128,6 +146,7 @@ class VideoReader:
 
     def close(self) -> None:
         """Release the underlying media container."""
+        self.decoder.close()
         self.container.close()
 
     def __enter__(self) -> VideoReader:
@@ -135,6 +154,45 @@ class VideoReader:
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
+
+    def _decode_window(
+        self,
+        start: float,
+        end: float,
+        target: tuple[int, int] | None,
+    ) -> list[np.ndarray]:
+        """Collect the RGB frames of one window from the active decoder."""
+        self.container.seek(
+            int(start / self.stream.time_base),
+            stream=self.stream,
+            backward=True,
+            any_frame=False,
+        )
+        self.decoder.reset()
+
+        # The decoder applies the scale itself when it was built for this size,
+        # so re-scaling here would only undo the point of doing it on the GPU.
+        needs_rescale = target is not None and self.decoder.output_size != target
+
+        frames: list[np.ndarray] = []
+        for timestamp, frame in self.decoder.decode(self.container, self.stream):
+            if timestamp < start:
+                continue
+            if timestamp >= end:
+                break
+
+            if needs_rescale and target is not None:
+                frame = frame.reformat(width=target[0], height=target[1], format="rgb24")
+
+            frames.append(frame.to_ndarray(format="rgb24"))
+        return frames
+
+    def _can_downgrade(self) -> bool:
+        return self.decoder.name != "cpu" and self.decode_policy.allow_fallback
+
+    def _downgrade_to_software(self) -> None:
+        self.decoder.close()
+        self.decoder = SoftwareDecoder(self.stream, self.decode_policy.threads)
 
     def _fps(self) -> float:
         if self.stream.average_rate is None:

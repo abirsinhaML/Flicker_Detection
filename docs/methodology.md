@@ -222,6 +222,41 @@ measured CPU hours/video-hour by 21,700 corpus hours and the selected worker pri
 Running workers in the bucket's own region avoids cross-region egress entirely,
 which at corpus scale dominates compute cost.
 
+### Where the time actually goes
+
+Measured on this corpus's frame size (3840×2880 H.264, 29.97 fps), per 3-second
+window:
+
+| stage | CPU |
+|---|---|
+| software decode + swscale downscale | 4.08 s |
+| NVDEC decode + swscale downscale | 2.24 s |
+| NVDEC decode with in-decoder downscale | 0.54 s |
+| signal extraction (320×180, 90 frames) | 0.16 s |
+| features + all three detectors + aggregation | 0.09 s |
+
+Everything the detectors do is about 1% of a window. Decoding is the workload,
+and it is the only part worth moving to hardware — Welch on a 90-sample signal
+and a 1081×135 phase-grid search are far too small to survive kernel-launch
+overhead on a GPU, so they stay on the CPU deliberately rather than by neglect.
+
+`decode.backend` selects NVDEC where the driver, codec, and resolution allow it,
+and degrades to software otherwise; a batch that silently dropped videos for
+want of a GPU would be worse than a slow one. `decode.gpu_resize` decides
+whether NVDEC also performs the downscale, which is the difference between 2.24 s
+and 0.54 s but introduces a scaler that is not swscale's. Because the thresholds
+in `decision` are fitted against measured scores, verify the backends agree on
+real footage before switching a batch:
+
+```bash
+uv run python scripts/compare_decode_backends.py s3://bucket/key.mp4 \
+  --config configs/detector_1.yaml
+```
+
+With NVDEC the bottleneck stops being CPU cores and becomes the GPU's decode
+engines, its memory — each worker holds a CUDA context — and S3 egress. A worker
+count tuned for software decode will be wrong; re-measure it.
+
 Credentials, region, and read permission are checked once before any worker
 starts, so an expired token halts the batch rather than producing one error row
 per video. Resuming keeps successful rows and retries the rest, which is the

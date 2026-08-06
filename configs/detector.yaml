@@ -18,6 +18,49 @@ sampling:
   mode: uniform
   resize: [320, 180]
 
+# How frames are turned back into pixels. Decoding is this pipeline's entire
+# cost: the analysed signal is 320x180, but the sources are 3840x2880 at 29.97
+# fps, so libavcodec spends far more CPU reconstructing frames than the
+# detectors spend measuring them. On one 3s window of 4K H.264, software decode
+# costs 1.65 s of CPU against 0.33 s for NVDEC.
+decode:
+  # auto = NVDEC when the driver, codec, and resolution allow, software
+  # otherwise. cuda = insist on NVDEC (still falls back unless allow_fallback
+  # is false). cpu = the previous behaviour.
+  backend: auto
+  gpu_index: 0
+  # Software-path frame threading; 0 lets FFmpeg pick. PyAV leaves threading
+  # off by default, which is worth 22s -> 8s per 30s of 4K.
+  threads: 0
+  # Hardware decode is an optimisation, never a requirement: an unsupported
+  # profile or an exhausted GPU must slow the batch down, not drop videos from
+  # it. Set false only to prove the hardware path is actually being taken.
+  allow_fallback: true
+  # Where the 3840x2880 -> 320x180 downscale happens. Measured CPU per 3s window
+  # of 4K: software decode + swscale 4.08s, NVDEC + swscale 2.24s, NVDEC with
+  # in-decoder downscale 0.54s.
+  #
+  #   false -> NVDEC decodes, swscale downscales. Bit-identical to the software
+  #            path wherever chroma is trivial, because NVDEC implements the
+  #            same normative H.264 reconstruction; scores stay comparable with
+  #            every result already in output/. ~1.8x less CPU.
+  #   true  -> NVDEC downscales too, so full-res frames never cross PCIe.
+  #            ~7.6x less CPU. Its scaler is not swscale's: on a clip with a
+  #            genuine rolling band that moved flicker_score by +0.0013 (worst
+  #            channel 0.0077) against boundaries at 0.328 and 0.51. Drift is
+  #            largest where a detector has no real signal and is reporting its
+  #            own noise floor.
+  #
+  # Validate on real corpus videos with scripts/compare_decode_backends.py
+  # before switching a batch, and re-run calibration if the drift matters.
+  gpu_resize: false
+
+# NOTE ON WORKER COUNT: with NVDEC the bottleneck stops being CPU cores and
+# becomes the GPU's decode engines, its memory, and S3 egress. Each worker
+# holds its own CUDA context (a few hundred MB of VRAM), so --workers 32 that
+# made sense for software decode will exhaust a 23 GB card long before it
+# saturates it. Start near the number of NVDEC engines times two and measure.
+
 detector_version: "0.2.0"
 
 # Which pixels a window's signals are measured over. This corpus is fisheye:

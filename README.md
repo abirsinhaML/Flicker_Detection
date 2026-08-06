@@ -74,6 +74,41 @@ uv run python main.py s3://humyn-data-partners-prod/visionlab/visionlab/outbound
 uv run python main.py path/to/local.mp4 --output output/flag_manifest.csv
 ```
 
+## Hardware decode
+
+Decoding is the entire cost of this pipeline: the sources are 3840×2880 at 29.97
+fps while the analysed signal is 320×180, so per 3-second window software decode
+spends 4.08 s of CPU against 0.24 s for every detector and feature combined.
+NVDEC does the same window for 0.54 s.
+
+`decode.backend` defaults to `auto`, which uses NVDEC when the driver, codec, and
+resolution allow and falls back to software otherwise — an unsupported profile or
+an exhausted GPU slows a batch down, it never drops videos from it. The chosen
+backend is logged per video and can be forced from the command line:
+
+```bash
+uv run python main.py --s3-prefix --decode-backend cuda --workers 8 --resume
+```
+
+`decode.gpu_resize` decides whether NVDEC also performs the downscale. That is
+the difference between 2.24 s and 0.54 s of CPU per window, but it substitutes
+NVDEC's scaler for swscale's. Since `decision.mild_threshold` and
+`decision.extreme_threshold` are fitted against measured scores, confirm the
+backends agree on real footage before switching a batch:
+
+```bash
+uv run python scripts/compare_decode_backends.py \
+  s3://humyn-data-partners-prod/.../clip.mp4 --config configs/detector_1.yaml
+```
+
+The script scores each video on both backends, refuses to fall back silently,
+and exits non-zero if any video changes severity band or route.
+
+**Worker count changes with the backend.** Under NVDEC the bottleneck is no
+longer CPU cores but the GPU's decode engines, its memory (each worker holds its
+own CUDA context), and S3 egress. A `--workers` value tuned for software decode
+will be wrong; re-measure it.
+
 ## Resuming
 
 `--workers N` sets the number of parallel process workers. `--resume` keeps
