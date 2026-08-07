@@ -4,14 +4,13 @@ s3:
   # Remove or comment out prefixes to use the single prefix field instead.
   # Mark completed prefixes with "# done" or comment them out entirely to skip.
   prefixes:
-    - raw/2026-05-08/project-test/6fff9233-e3c5-433e-83be-ee22084dc67b/
-    - raw/2026-05-16/mirana_test/
-    - raw/2026-05-16/project-test/
-    - raw/collector_app/
-    - raw/dataset_test/
-    - raw/Delhi_Zetwork/2026-06-27/
-    - raw/Delhi_ZetWork/
-    - raw/DelhiZetWork/2026-06-01/
+    - raw/Kalpana_Furnitures_Chennai/
+    - raw/Kalpanafurnitures/2026-07-18/
+    - raw/KPM/
+    - raw/MadhyaPradesh/2026-05-25/
+    - raw/mirana_old/2026-06-12/
+    - raw/mirana_old/2026-06-13/2026-04-22/
+    - raw/mirana/
   # Single prefix (used only if prefixes is not set or empty)
   prefix: raw/2026-05-16/mirana_test/
   # Must match the bucket's region: SigV4 presigning is region-scoped, and a
