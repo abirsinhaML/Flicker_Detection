@@ -31,6 +31,7 @@ Thumbs.db
 # negations beneath it dead letters.
 output/*
 !output/reference_flag_manifest.csv
+!output/flag_manifest.csv
 reports/*
 !reports/calibration_report.md
 results/

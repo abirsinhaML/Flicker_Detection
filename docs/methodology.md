@@ -222,6 +222,53 @@ measured CPU hours/video-hour by 21,700 corpus hours and the selected worker pri
 Running workers in the bucket's own region avoids cross-region egress entirely,
 which at corpus scale dominates compute cost.
 
+### Where the time actually goes
+
+Per 3-second window of 320×180 analysed content, signal extraction costs 0.16 s
+and every feature, detector, and the aggregation together cost 0.09 s. Decoding
+the 3840×2880 source that window came from costs an order of magnitude more.
+The detectors are about 1% of a window, so they are the wrong thing to optimise
+and are deliberately left on the CPU: Welch on a 90-sample signal and the
+1081×135 phase-grid search in `rolling_band` are far too small to survive
+kernel-launch overhead on a GPU.
+
+Decoding is the workload, and it is the part worth moving to hardware.
+`decode.backend` selects NVDEC where the driver, codec, and resolution allow it
+and degrades to software otherwise, because a batch that silently dropped videos
+for want of a GPU would be worse than a slow one.
+
+Measured end to end on 24 real corpus videos through the ordinary batch path, on
+one 16-core machine with an A10G:
+
+| run | wall | user CPU |
+|---|---|---|
+| `--decode-backend cpu --workers 16` | 415.6 s | 6173.5 s |
+| `--decode-backend cuda --workers 16` | 230.8 s | 1936.7 s |
+| `--decode-backend cuda --workers 32` | 211.1 s | 1954.9 s |
+
+1.8× the throughput for 3.2× less CPU, with no fallbacks and no video changing
+severity band or route. The worst `flicker_score` difference across all 24 was
+0.00055.
+
+The bottleneck moves rather than disappearing. During the 16-worker GPU run the
+NVDEC engine sat pinned at 100% while the SMs idled near 40% and VRAM held 6 GB
+of 23 GB — about 375 MB per worker. That is why doubling to 32 workers bought
+only 9%: the decode engine was already saturated, and past that point more
+workers buy contention rather than throughput. Sizing for NVDEC, not for cores
+or memory, is what matters now.
+
+`decode.gpu_resize` moves the downscale into NVDEC as well and cuts per-window
+CPU further, but its scaler is not swscale's, and a 16× vertical reduction is
+exactly where the banding evidence lives. On real footage that is not a free
+change: of the first three corpus videos tried, one moved from 0.352 to 0.310,
+crossing `mild_threshold` and turning `review` into `accept`. Enabling it means
+re-fitting `decision` against GPU-decoded scores. Verify any such change first:
+
+```bash
+uv run python scripts/compare_decode_backends.py s3://bucket/key.mp4 \
+  --config configs/detector_1.yaml
+```
+
 Credentials, region, and read permission are checked once before any worker
 starts, so an expired token halts the batch rather than producing one error row
 per video. Resuming keeps successful rows and retries the rest, which is the

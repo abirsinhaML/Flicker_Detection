@@ -8,6 +8,7 @@ import logging
 import os
 from collections.abc import Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from datetime import datetime, timezone
 from itertools import chain, islice
 from pathlib import Path
 from time import perf_counter
@@ -25,6 +26,7 @@ from src.calibration.thresholds import (
 from src.core.aggregator import DetectionAggregator, ScoreNormalizer, WindowMetrics
 from src.core.pipeline import DetectionPipeline
 from src.core.types import ManifestEntry, VideoResult
+from src.data.decode import BACKENDS, DecodePolicy
 from src.data.manifest import ManifestReader, key_for_uri, write_manifest
 from src.data.reader import VideoReader
 from src.data.s3_source import S3AccessError, S3Settings, SourceResolver, redact_url
@@ -40,7 +42,7 @@ from src.utils.logger import configure_logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 OUTPUT_FIELDS = (
     "schema_version",
     "status",
@@ -60,6 +62,9 @@ OUTPUT_FIELDS = (
     "valid_fraction",
     "processing_time_seconds",
     "detector_version",
+    # Appended, so an older manifest still parses and resumes; rows written
+    # before this column existed simply carry an empty value.
+    "completed_at",
 )
 
 
@@ -78,6 +83,7 @@ def process_video(
         stride=sampler_config["stride"],
     )
     resize = _parse_resize(sampler_config.get("resize"))
+    decode_policy = DecodePolicy.from_config(config.get("decode"))
     region_policy = RegionPolicy.from_config(config.get("analysis_region"))
     flicker_band = config.get("flicker_band") or {}
     min_flicker = float(flicker_band.get("min_frequency") or 0.0)
@@ -89,21 +95,23 @@ def process_video(
     window_specs: list[WindowSpec] = []
     diagnostics: list[tuple[float, float]] = []
     logger.info("Processing video: %s", video_key or redact_url(str(video_path)))
-    with VideoReader(video_path) as reader:
+    with VideoReader(video_path, decode_policy=decode_policy, resize=resize) as reader:
         metadata = reader.metadata()
         logger.info(
-            "Video metadata: duration=%.2fs fps=%.3f dimensions=%dx%d",
+            "Video metadata: duration=%.2fs fps=%.3f dimensions=%dx%d decode=%s",
             metadata.duration,
             metadata.fps,
             metadata.width,
             metadata.height,
+            reader.decode_backend,
         )
         for spec in sampler.sample(metadata.duration):
             logger.debug("Processing window start=%.2fs end=%.2fs", spec.start_time, spec.end_time)
+            # The reader already knows the target size, and applies it inside the
+            # decoder where the backend allows, so it is not repeated per window.
             window = reader.read_window(
                 start=spec.start_time,
                 duration=spec.end_time - spec.start_time,
-                resize=resize,
             )
             signals = SignalExtractor.extract(window, region_policy)
             features = FeatureExtractor.extract(
@@ -233,11 +241,14 @@ def run_s3_prefix(
     The listing streams, so a prefix holding the full corpus never has to be
     materialized before work starts.
     """
-    catalog = S3Settings.from_config(config).catalog(listing_root)
-    catalog.verify_access()
-    logger.info("Listing videos under s3://%s/%s", catalog.bucket, catalog.prefix)
+    catalogs = S3Settings.from_config(config).catalogs(listing_root)
+    for catalog in catalogs:
+        catalog.verify_access()
+        logger.info("Listing videos under s3://%s/%s", catalog.bucket, catalog.prefix)
+    
+    entries = chain.from_iterable(catalog.list_entries() for catalog in catalogs)
     run_batch(
-        catalog.list_entries(),
+        entries,
         output_path,
         config,
         limit=limit,
@@ -362,14 +373,16 @@ def snapshot_s3_manifest(
     Pinning the listing this way makes a run reproducible: the same manifest
     yields the same work set even as the bucket gains objects.
     """
-    catalog = S3Settings.from_config(config).catalog(listing_root)
-    catalog.verify_access()
-    written = write_manifest(catalog.list_entries(limit=limit), manifest_path)
+    catalogs = S3Settings.from_config(config).catalogs(listing_root)
+    for catalog in catalogs:
+        catalog.verify_access()
+    
+    entries = chain.from_iterable(catalog.list_entries(limit=limit) for catalog in catalogs)
+    written = write_manifest(entries, manifest_path)
     logger.info(
-        "Wrote %d entries from s3://%s/%s to %s",
+        "Wrote %d entries from %d prefixes to %s",
         written,
-        catalog.bucket,
-        catalog.prefix,
+        len(catalogs),
         manifest_path,
     )
     return written
@@ -406,6 +419,7 @@ def result_to_row(result: VideoResult) -> dict[str, object]:
         "valid_fraction": result.valid_fraction,
         "processing_time_seconds": result.processing_time,
         "detector_version": result.detector_version,
+        "completed_at": _timestamp(),
     }
 
 
@@ -492,7 +506,18 @@ def _error_row(key: str, error: Exception, config: dict[str, Any]) -> dict[str, 
         "awb_score": "",
         "processing_time_seconds": "",
         "detector_version": config.get("detector_version", ""),
+        "completed_at": _timestamp(),
     }
+
+
+def _timestamp() -> str:
+    """When this row was produced, in UTC.
+
+    Written in the worker as the row is built, so it marks the moment a video
+    finished rather than when the parent got round to flushing it.  UTC keeps
+    the column sortable and immune to the host's timezone.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _horizontal_coherence(results: dict[str, object]) -> float:
@@ -577,6 +602,11 @@ def main() -> None:
         action="store_true",
         help="Keep videos already scored in the output and retry only the rest",
     )
+    parser.add_argument(
+        "--decode-backend",
+        choices=BACKENDS,
+        help="Override decode.backend: auto (NVDEC when usable), cuda, or cpu",
+    )
     parser.add_argument("--aws-profile", help="AWS named profile (default: standard chain)")
     parser.add_argument("--aws-region", help="Bucket region for SigV4 signing")
     parser.add_argument("--calibrate-labels", help="CSV with video_key,label reference labels")
@@ -596,7 +626,9 @@ def main() -> None:
         parser.error("provide exactly one of VIDEO, --manifest, or --s3-prefix")
 
     configure_logging(arguments.logging_config)
-    config = _apply_aws_overrides(load_config(arguments.config), arguments)
+    config = _apply_decode_overrides(
+        _apply_aws_overrides(load_config(arguments.config), arguments), arguments
+    )
     try:
         if arguments.calibrate_labels:
             # Rank every signal before fitting anything. A threshold fit on an
@@ -670,6 +702,16 @@ def _apply_aws_overrides(config: dict[str, Any], arguments: argparse.Namespace) 
     supplied = {name: value for name, value in overrides.items() if value}
     if supplied:
         config["s3"] = {**(config.get("s3") or {}), **supplied}
+    return config
+
+
+def _apply_decode_overrides(
+    config: dict[str, Any],
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    """Let ``--decode-backend`` override the config's ``decode`` block."""
+    if arguments.decode_backend:
+        config["decode"] = {**(config.get("decode") or {}), "backend": arguments.decode_backend}
     return config
 
 

@@ -265,6 +265,7 @@ class S3Settings:
 
     bucket: str | None = None
     prefix: str = ""
+    prefixes: tuple[str, ...] = ()
     region: str | None = DEFAULT_REGION
     profile: str | None = None
     presign_expiry_seconds: int = DEFAULT_PRESIGN_EXPIRY
@@ -275,9 +276,14 @@ class S3Settings:
         """Read settings from a loaded detector config, tolerating absence."""
         section = config.get("s3") or {}
         extensions = section.get("extensions") or DEFAULT_VIDEO_EXTENSIONS
+        
+        raw_prefixes = section.get("prefixes")
+        prefixes = tuple(str(p) for p in raw_prefixes) if isinstance(raw_prefixes, list) else ()
+        
         return cls(
             bucket=section.get("bucket"),
             prefix=str(section.get("prefix") or ""),
+            prefixes=prefixes,
             region=section.get("region") or DEFAULT_REGION,
             profile=section.get("profile"),
             presign_expiry_seconds=int(
@@ -320,6 +326,14 @@ class S3Settings:
             extensions=self.extensions,
             presign_expiry=self.presign_expiry_seconds,
         )
+
+    def catalogs(self, listing_root: str | None = None) -> list[S3VideoCatalog]:
+        """Build catalogs for the listing_root, or all configured prefixes."""
+        if listing_root:
+            return [self.catalog(listing_root)]
+        if self.prefixes:
+            return [self.catalog(p) for p in self.prefixes]
+        return [self.catalog()]
 
 
 def _credential_hint(action: str, error: Exception) -> str:

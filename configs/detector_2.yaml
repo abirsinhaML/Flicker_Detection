@@ -1,6 +1,18 @@
 s3:
-  bucket: humyn-data-partners-prod
-  prefix: visionlab/visionlab/outbound/
+  bucket: prod-egocentric-humyn-data
+  # When prefixes is set, all prefixes will be processed in order.
+  # Remove or comment out prefixes to use the single prefix field instead.
+  # Mark completed prefixes with "# done" or comment them out entirely to skip.
+  prefixes:
+    - raw/Kalpana_Furnitures_Chennai/
+    - raw/Kalpanafurnitures/2026-07-18/
+    - raw/KPM/
+    - raw/MadhyaPradesh/2026-05-25/
+    - raw/mirana_old/2026-06-12/
+    - raw/mirana_old/2026-06-13/2026-04-22/
+    - raw/mirana/
+  # Single prefix (used only if prefixes is not set or empty)
+  prefix: raw/2026-05-16/mirana_test/
   # Must match the bucket's region: SigV4 presigning is region-scoped, and a
   # mismatch yields URLs that fail with 403 rather than a clear error.
   region: ap-south-1
@@ -119,9 +131,9 @@ awb_detector:
 aggregation:
   positive_threshold: 0.5
   weights:
-    IlluminantDetector: 0.30
-    RollingBandDetector: 0.50
-    AWBDetector: 0.20
+    IlluminantDetector: 0.10
+    RollingBandDetector: 0.65
+    AWBDetector: 0.25
   illuminant_normalization:
     prominence_reference: 4.0
     periodicity_reference: 8.0
@@ -150,7 +162,7 @@ decision:
   # The clean/mild boundary sits in a genuine gap: no reference video scores
   # between 0.3195 (highest clean) and 0.3365 (lowest mild), so the midpoint is
   # the most defensible point and separates those two classes perfectly.
-  mild_threshold: 0.328
+  mild_threshold: 0.365
   # Placed just above 004_976 (0.5046), which reviewing the footage directly
   # judged mild despite the reference sheet's orange-vs-red ambiguity. This
   # deliberately disagrees with the sheet on four videos it marks extreme
@@ -158,4 +170,4 @@ decision:
   # of `reject`. That is the safe direction for a QC gate: a human still sees
   # them, whereas an over-called reject is acted on unseen. Worth revisiting
   # once the larger hand-labelled set exists.
-  extreme_threshold: 0.51
+  extreme_threshold: 0.59
