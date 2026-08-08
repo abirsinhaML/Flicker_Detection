@@ -36,8 +36,8 @@ cd "$(dirname "$0")/.."
 # shellcheck source=scripts/batch_procs.sh
 . "$(dirname "$0")/batch_procs.sh"
 
-CONFIG="${CONFIG:-configs/detector_1.yaml}"
-OUTPUT="${OUTPUT:-output/flag_manifest.csv}"
+CONFIG="${CONFIG:-configs/detector_2.yaml}"
+OUTPUT="${OUTPUT:-output/flag_manifest_2.csv}"
 WORKERS="${WORKERS:-32}"
 
 # A second batch writing the same CSV, or a previous run's orphans stealing cores,
