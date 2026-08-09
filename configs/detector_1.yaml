@@ -11,7 +11,7 @@ s3:
     - raw/dataset_test/
     - raw/Delhi_Zetwork/2026-06-27/
     - raw/Delhi_ZetWork/
-    - raw/DelhiZetWork/2026-06-01/
+
   # Single prefix (used only if prefixes is not set or empty)
   prefix: raw/2026-05-16/mirana_test/
   # Must match the bucket's region: SigV4 presigning is region-scoped, and a
