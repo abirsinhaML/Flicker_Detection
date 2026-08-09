@@ -35,7 +35,7 @@ output/*
 !output/flag_manifest_1.csv
 !output/flag_manifest_2.csv
 !output/flag_manifest_3.csv
-
+!output/flag_manifest_4.csv
 reports/*
 !reports/calibration_report.md
 results/
