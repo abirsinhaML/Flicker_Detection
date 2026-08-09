@@ -7,10 +7,8 @@ s3:
     - raw/Kalpana_Furnitures_Chennai/
     - raw/Kalpanafurnitures/2026-07-18/
     - raw/KPM/
-    - raw/MadhyaPradesh/2026-05-25/
-    - raw/mirana_old/2026-06-12/
-    - raw/mirana_old/2026-06-13/2026-04-22/
-    - raw/mirana/
+
+
   # Single prefix (used only if prefixes is not set or empty)
   prefix: raw/2026-05-16/mirana_test/
   # Must match the bucket's region: SigV4 presigning is region-scoped, and a
