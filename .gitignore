@@ -34,6 +34,7 @@ output/*
 reports/*
 !reports/calibration_report.md
 results/
+data/
 
 # Video files (avoid committing large media)
 *.mp4
