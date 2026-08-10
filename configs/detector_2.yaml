@@ -7,6 +7,15 @@ s3:
     - raw/Kalpana_Furnitures_Chennai/
     - raw/Kalpanafurnitures/2026-07-18/
     - raw/KPM/
+    - raw/Delhi_ZetWork/2026-06-2/
+    - raw/Delhi_ZetWork/2026-06-20/
+    - raw/Delhi_ZetWork/2026-06-22/
+    - raw/Delhi_ZetWork/2026-06-23/
+    - raw/Delhi_ZetWork/2026-06-24/
+    - raw/Delhi_ZetWork/2026-06-25/
+    - raw/Delhi_ZetWork/2026-06-26/
+    - raw/Delhi_ZetWork/2026-06-27/
+    - raw/Delhi_ZetWork/2026-06-29/
 
 
   # Single prefix (used only if prefixes is not set or empty)
