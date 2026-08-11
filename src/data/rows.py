@@ -15,6 +15,8 @@ instances collide.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from itertools import accumulate
 
 import pandas as pd
 
@@ -68,6 +70,62 @@ def describe_row_range(
     first = from_row or 0
     last = "end" if to_row is None else to_row
     return f"rows {first}..{last} inclusive: {selected} of {total}"
+
+
+def weighted_shard_ranges(weights: Sequence[float], shards: int) -> list[tuple[int, int]]:
+    """Split rows into ``shards`` contiguous ranges of near-equal total weight.
+
+    Equal *row counts* do not mean equal work: this corpus runs from 0.02 s to
+    3.7 hours per video, and cost is proportional to duration because decode is
+    ~94% of it.  Splitting 140,519 rows six ways by count leaves the heaviest
+    shard with 1.20x the hours of the lightest, so a fleet spends a fifth of its
+    wall time with an instance already finished and idle.  Weighting by duration
+    removes that.
+
+    Ranges stay contiguous, so they are still expressible as
+    ``--from-row``/``--to-row`` and still tile the input exactly.
+
+    At each boundary the split takes whichever side of the target is *closer*
+    rather than the first row past it.  Always closing after the crossing
+    overshoots systematically -- on ``[1]*5 + [100]*5`` split in two it gives
+    305/200 where 205/300 was available -- and the bias compounds across shards,
+    loading the early ones.
+    """
+    if shards < 1:
+        raise ValueError("shards must be at least one")
+    total_rows = len(weights)
+    if total_rows == 0:
+        return []
+    if shards >= total_rows:
+        return [(index, index) for index in range(total_rows)]
+
+    # Negative weights would break the monotonicity the scan below relies on;
+    # a duration cannot be negative, so clamping is the honest reading of one.
+    values = [max(0.0, float(weight)) for weight in weights]
+    total_weight = sum(values)
+    if total_weight <= 0:
+        return shard_ranges(total_rows, shards)
+
+    prefix = list(accumulate(values))
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for shard in range(shards - 1):
+        target = total_weight * (shard + 1) / shards
+        # The last row this shard may take, leaving one for each shard after it.
+        highest = total_rows - shards + shard
+        best, best_distance = start, abs(prefix[start] - target)
+        for index in range(start, highest + 1):
+            distance = abs(prefix[index] - target)
+            if distance < best_distance:
+                best, best_distance = index, distance
+            # prefix only grows, so once past the target nothing later is closer.
+            if prefix[index] >= target:
+                break
+        ranges.append((start, best))
+        start = best + 1
+
+    ranges.append((start, total_rows - 1))
+    return ranges
 
 
 def shard_ranges(total: int, shards: int) -> list[tuple[int, int]]:

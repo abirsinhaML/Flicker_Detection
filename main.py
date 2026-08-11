@@ -48,7 +48,7 @@ from src.data.results import (
     ResultWriter,
     read_successful_records,
 )
-from src.data.rows import shard_ranges, validate_row_range
+from src.data.rows import shard_ranges, validate_row_range, weighted_shard_ranges
 from src.data.s3_source import (
     S3AccessError,
     S3Settings,
@@ -810,20 +810,41 @@ def print_shards(arguments: argparse.Namespace, config: dict[str, Any]) -> None:
     """
     if arguments.links is not None:
         source = _links_path(arguments, config, None)
-        total = len(LinkSheetReader(source))
-        flag = f"--links {source}"
+        reader = LinkSheetReader(source)
+        frame, flag = reader.frame, f"--links {source}"
+        durations = (
+            frame[reader.duration_column].tolist() if reader.duration_column else []
+        )
     elif arguments.manifest:
         source = arguments.manifest
-        total = len(ManifestReader(source))
-        flag = f"--manifest {source}"
+        manifest = ManifestReader(source)
+        frame, flag = manifest.df, f"--manifest {source}"
+        durations = frame["duration_s"].tolist() if "duration_s" in frame.columns else []
     else:
         raise SystemExit("--print-shards needs --links or --manifest")
 
-    ranges = shard_ranges(total, arguments.print_shards)
-    print(f"\n{total:,} rows in {source} -> {len(ranges)} shards\n")
+    total = len(frame)
+    # Balance on duration when the input carries it: decode is ~94% of the cost,
+    # so hours predict runtime and row counts do not.  Equal row counts leave the
+    # heaviest of six shards with 1.20x the hours of the lightest.
+    if durations and arguments.shard_by == "duration":
+        ranges = weighted_shard_ranges(durations, arguments.print_shards)
+        basis = "balanced by duration"
+    else:
+        ranges = shard_ranges(total, arguments.print_shards)
+        basis = "balanced by row count"
+
+    total_hours = sum(durations) / 3600 if durations else 0.0
+    print(f"\n{total:,} rows in {source} -> {len(ranges)} shards, {basis}")
+    if total_hours:
+        print(f"{total_hours:,.0f} hours of video\n")
     for index, (first, last) in enumerate(ranges):
+        detail = f"{last - first + 1:,} rows"
+        if durations:
+            hours = sum(durations[first : last + 1]) / 3600
+            detail += f", {hours:,.0f} h"
         print(
-            f"  # instance {index}  ({last - first + 1:,} rows)\n"
+            f"  # instance {index}  ({detail})\n"
             f"  scripts/run_batch.sh {flag} --from-row {first} --to-row {last}\n"
         )
     covered = sum(last - first + 1 for first, last in ranges)
@@ -948,6 +969,16 @@ def main() -> None:
             "Print the --from-row/--to-row pairs that split the input into N "
             "equal, non-overlapping shards, then exit without scoring. Hand-typed "
             "ranges are where fleet gaps and double-scoring come from."
+        ),
+    )
+    parser.add_argument(
+        "--shard-by",
+        choices=("duration", "rows"),
+        default="duration",
+        help=(
+            "How --print-shards balances the shards. duration (default) equalises "
+            "hours of video, which is what equalises runtime; rows equalises the "
+            "row count, which leaves the heaviest shard ~1.2x the lightest."
         ),
     )
     parser.add_argument(
