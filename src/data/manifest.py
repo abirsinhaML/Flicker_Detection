@@ -15,9 +15,21 @@ from pathlib import Path
 import pandas as pd
 
 from src.core.types import ManifestEntry
+from src.data.rows import describe_row_range, row_slice
 from src.data.s3_source import build_s3_uri, is_s3_uri, parse_s3_uri
 
-MANIFEST_FIELDS: tuple[str, ...] = ("key", "source_uri", "size_bytes", "last_modified")
+MANIFEST_FIELDS: tuple[str, ...] = (
+    "key",
+    "source_uri",
+    "size_bytes",
+    "last_modified",
+    # Carried so a manifest pinned from the link sheet is equivalent to reading
+    # the sheet: without these, snapshotting would silently drop the project
+    # grouping and the sheet's stated duration.
+    "project_name",
+    "video_id",
+    "duration_s",
+)
 _TEXT_SUFFIXES = frozenset({".txt", ".list", ".lst"})
 
 
@@ -38,13 +50,25 @@ class ManifestReader:
     URI_COLUMNS: tuple[str, ...] = ("source_uri", "s3_uri", "uri", "url")
     KEY_COLUMNS: tuple[str, ...] = ("key", "video_key")
 
-    def __init__(self, manifest_path: str | Path, *, default_bucket: str | None = None) -> None:
+    def __init__(
+        self,
+        manifest_path: str | Path,
+        *,
+        default_bucket: str | None = None,
+        from_row: int | None = None,
+        to_row: int | None = None,
+    ) -> None:
         self.manifest_path = Path(manifest_path)
         if not self.manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found: {self.manifest_path}")
 
         self.default_bucket = default_bucket
-        self.df = self._read(self.manifest_path)
+        frame = self._read(self.manifest_path)
+        # Same inclusive row semantics as the link sheet, so a pinned manifest
+        # shards across instances exactly the way the sheet does.
+        self.total_rows = len(frame)
+        self.df = row_slice(frame, from_row, to_row)
+        self.row_range = describe_row_range(self.total_rows, len(self.df), from_row, to_row)
         self.uri_column = self._first_present(self.URI_COLUMNS)
         self.key_column = self._first_present(self.KEY_COLUMNS)
         if self.uri_column is None and self.key_column is None:
@@ -75,6 +99,9 @@ class ManifestReader:
             source_uri=source_uri,
             size_bytes=_optional_int(row.get("size_bytes")),
             last_modified=_optional_datetime(row.get("last_modified")),
+            project_name=_clean(row.get("project_name")),
+            video_id=_clean(row.get("video_id")),
+            duration_seconds=_optional_float(row.get("duration_s")),
         )
 
     def _source_uri_for_key(self, key: str) -> str:
@@ -127,6 +154,11 @@ def write_manifest(entries: Iterable[ManifestEntry], output_path: str | Path) ->
                     "last_modified": (
                         "" if entry.last_modified is None else entry.last_modified.isoformat()
                     ),
+                    "project_name": entry.project_name or "",
+                    "video_id": entry.video_id or "",
+                    "duration_s": (
+                        "" if entry.duration_seconds is None else entry.duration_seconds
+                    ),
                 }
             )
             written += 1
@@ -153,6 +185,16 @@ def _optional_int(value: object) -> int | None:
         return None
     try:
         return int(float(text))
+    except ValueError:
+        return None
+
+
+def _optional_float(value: object) -> float | None:
+    text = _clean(value)
+    if text is None:
+        return None
+    try:
+        return float(text)
     except ValueError:
         return None
 

@@ -2,8 +2,19 @@
 
 ## Method
 
-The system samples three-second windows every 20 seconds, always including an
-end-anchored final window. Frames are decoded with PyAV and downsampled to
+The system measures contiguous three-second windows: the stride equals the window,
+so the schedule tiles the video end to end and a ten-minute video is 200 windows,
+with an end-anchored final window covering any remainder. Every window is scored,
+graded, and reported; the video-level score is the maximum over them.
+
+It previously sampled a three-second window every 20 seconds, covering 15.5% of a
+video, which left gaps an artifact could fall entirely inside. Removing them costs
+~6× the decode work and shifts the video score upward — a maximum over 200 draws
+rather than 31 — so `decision` needs re-fitting against contiguous scores. A
+gapless schedule is decoded in one forward pass rather than by seeking per window,
+which is worth ~20% of wall time for bit-identical output.
+
+Frames are decoded with PyAV and downsampled to
 320×180 before analysis. This reduces spatial work substantially while retaining
 the temporal samples required for flicker analysis. The three-second window
 preserves the frame-rate-dependent Nyquist limit; mains-driven behavior can

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from src.core.types import FeatureVector, SignalFeatures
 from src.features.frequency import FrequencyAnalyzer
-from src.features.temporal import TemporalFeatures
 
 
 class FeatureExtractor:
@@ -31,7 +30,6 @@ class FeatureExtractor:
             row_profiles=signals.row_profiles,
             column_band_profiles=signals.column_band_profiles,
             fps=fps,
-            temporal=TemporalFeatures.summarize(signals.luma),
             frequency=FrequencyAnalyzer.compute(
                 signals.luma,
                 fps,

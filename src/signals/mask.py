@@ -65,10 +65,6 @@ class AnalysisRegion:
     rows: np.ndarray
     valid_fraction: float
 
-    @property
-    def is_full_frame(self) -> bool:
-        return bool(self.mask.all())
-
     @classmethod
     def detect(cls, luma_frames: np.ndarray, policy: RegionPolicy) -> AnalysisRegion:
         """Find the live pixels of a ``(frames, height, width)`` luma batch.

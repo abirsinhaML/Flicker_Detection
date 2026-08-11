@@ -18,13 +18,16 @@ trap 'rm -rf "$WORK"' EXIT
 
 # A video the assignment cites as visibly flickering: the strongest single
 # end-to-end signal that detection still works when read over the network.
-FLICKER_KEY="visionlab/visionlab/outbound/India_Ahmedabad_Mirana_AssemblyLine_004_998.mp4"
-BUCKET="humyn-data-partners-prod"
+CONFIG="${CONFIG:-configs/detector_1.yaml}"
+# A corpus video measured to score `extreme`: the strongest single end-to-end
+# signal that detection still works when read over the network.
+FLICKER_KEY="raw/Delhi_ZetWork/2026-06-17/HAA344/GX010091.MP4"
+BUCKET="prod-egocentric-humyn-data"
 
 pass() { printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; exit 1; }
 step() { printf '\n\033[1m[%s] %s\033[0m\n' "$1" "$2"; }
-run()  { uv run python main.py "${PASSTHRU[@]}" "$@" 2>&1 | grep -vE 'objc\[|libav.*dylib|may cause spurious'; }
+run()  { uv run python main.py --config "$CONFIG" "${PASSTHRU[@]}" "$@" 2>&1 | grep -vE 'objc\[|libav.*dylib|may cause spurious'; }
 
 step 1 "Credentials resolve through the standard AWS chain"
 uv run python - <<'PY' || fail "No usable credentials. Re-export them, or pass --aws-profile NAME."
@@ -50,43 +53,73 @@ step 3 "Read permission on one object (the batch preflight HEAD)"
 uv run python - <<PY || fail "cannot read the object. Likely a region mismatch (SigV4 is region-scoped) or a missing s3:GetObject grant."
 from src.data.s3_source import S3Settings
 from main import load_config
-resolver = S3Settings.from_config(load_config("configs/detector.yaml")).resolver()
+resolver = S3Settings.from_config(load_config("$CONFIG")).resolver()
 resolver.verify_readable("s3://$BUCKET/$FLICKER_KEY")
 print("    HEAD succeeded")
 PY
 pass "object is readable"
 
 step 4 "Decode and score one known-flickering video over HTTP range reads"
-echo "    (~1-2 min: signs a URL, then streams only the sampled windows)"
-run "s3://$BUCKET/$FLICKER_KEY" --output "$WORK/one.csv" | tail -4
-[ -s "$WORK/one.csv" ] || fail "no output written"
-uv run python - <<PY || fail "scored row is malformed"
-import csv
-row = next(csv.DictReader(open("$WORK/one.csv")))
-assert row["status"] == "ok", row.get("error")
-print(f"    score={row['flicker_score'][:6]} band={row['severity_band']} "
-      f"route={row['route']} worst={row['worst_segment_start']}-{row['worst_segment_end']}s")
-print(f"    illuminant={row['illuminant_score'][:6]} band_det={row['rolling_band_score'][:6]} "
-      f"awb={row['awb_score'][:6]}  ({row['processing_time_seconds'][:5]}s)")
-assert row["severity_band"] != "none", (
+echo "    (signs a URL, then streams the whole video: windows are contiguous)"
+run "s3://$BUCKET/$FLICKER_KEY" \
+    --output "$WORK/one.jsonl" \
+    --video-csv "$WORK/one.csv" \
+    --window-dir "$WORK/window_metrics" | tail -5
+[ -s "$WORK/one.jsonl" ] || fail "no output written"
+uv run python - <<PY || fail "scored record is malformed"
+import json
+from src.core.records import window_csv_path
+
+record = json.loads(open("$WORK/one.jsonl").read().strip())
+assert record["status"] == "ok", record.get("error")
+aggregate, windows = record["aggregate"], record["windows"]
+print(f"    score={aggregate['flicker_score']:.4f} band={aggregate['severity_band']} "
+      f"route={aggregate['route']} "
+      f"worst={aggregate['worst_segment_start']:.1f}-{aggregate['worst_segment_end']:.1f}s")
+print(f"    windows={aggregate['total_windows']} bands={aggregate['band_counts']}")
+
+# Every reported column must reconcile with the windows it summarises.
+scores = [w["score"] for w in windows]
+assert len(windows) == aggregate["total_windows"], "window count disagrees with the rollup"
+assert abs(aggregate["flicker_score"] - max(scores)) < 1e-9, (
+    "flicker_score is not the maximum of its windows")
+gaps = [b["start_time"] - a["end_time"] for a, b in zip(windows, windows[1:])]
+assert not gaps or max(gaps) <= 1e-9, "schedule left a gap; windows should be contiguous"
+
+# The per-video CSV must exist at the video's own key path.
+per_video = window_csv_path(record["video_key"], "$WORK/window_metrics")
+assert per_video.is_file(), f"no window CSV at {per_video}"
+rows = sum(1 for _ in per_video.open()) - 1
+assert rows == len(windows), f"window CSV has {rows} rows for {len(windows)} windows"
+print(f"    window csv: {per_video.name} ({rows} rows)")
+
+assert aggregate["severity_band"] != "none", (
     "reference flicker video scored 'none' -- detection or thresholds need review")
 PY
-pass "known-flickering video scored above the clean band"
+pass "known-flickering video scored above the clean band, and its output reconciles"
 
-step 5 "Parallel batch from the live prefix"
-run --s3-prefix --output "$WORK/batch.csv" --limit 4 --workers 4 | grep -E "Progress|Finished|Rate:|videos/s" | tail -4
+step 5 "Parallel batch from the link sheet, over a row range"
+run --links --from-row 0 --to-row 3 \
+    --output "$WORK/batch.jsonl" --no-window-dir --no-video-csv --workers 4 \
+    | grep -E "rows |Link resolution|Progress|Finished|Rate:" | tail -5
 ok=$(uv run python -c "
-import csv; rows=list(csv.DictReader(open('$WORK/batch.csv')))
-print(sum(r['status']=='ok' for r in rows))")
-[ "$ok" -gt 0 ] || fail "no video completed; see error column in $WORK/batch.csv"
-pass "$ok/4 videos scored in parallel"
+import json
+rows = [json.loads(line) for line in open('$WORK/batch.jsonl')]
+print(sum(r['status'] == 'ok' for r in rows))")
+[ "$ok" -gt 0 ] || fail "no video completed; see the error field in $WORK/batch.jsonl"
+pass "$ok/4 videos scored in parallel from rows 0..3"
 
-step 6 "Resume does no rework and keeps one row per key"
-before=$(md5 -q "$WORK/batch.csv" 2>/dev/null || md5sum "$WORK/batch.csv" | cut -d' ' -f1)
-run --s3-prefix --output "$WORK/batch.csv" --limit 4 --workers 4 --resume | grep -E "Resuming|No entries" | tail -2
-after=$(md5 -q "$WORK/batch.csv" 2>/dev/null || md5sum "$WORK/batch.csv" | cut -d' ' -f1)
-[ "$before" = "$after" ] || fail "resume rewrote already-scored rows"
+step 6 "Resume does no rework and keeps one record per key"
+before=$(md5sum "$WORK/batch.jsonl" | cut -d' ' -f1)
+run --links --from-row 0 --to-row 3 \
+    --output "$WORK/batch.jsonl" --no-window-dir --no-video-csv --workers 4 --resume \
+    | grep -E "Resuming|No entries" | tail -2
+after=$(md5sum "$WORK/batch.jsonl" | cut -d' ' -f1)
+[ "$before" = "$after" ] || fail "resume rewrote already-scored records"
 pass "resume was a no-op on completed work"
 
 printf '\n\033[32mAll checks passed.\033[0m Ready for a full run:\n'
-printf '  uv run python main.py --s3-prefix --output output/flag_manifest.csv --workers 8 --resume\n\n'
+printf '  scripts/run_batch.sh                              # whole sheet\n'
+printf '  scripts/run_batch.sh --from-row 0 --to-row 14051  # one shard of ten\n\n'
+printf 'Shard ranges for a fleet:\n'
+printf '  uv run python main.py --links --print-shards 10\n\n'

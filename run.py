@@ -2,8 +2,12 @@
 """Convenience wrapper: run the detector on the pinned reference manifest.
 
 Videos are read from S3, so AWS credentials must be present in the environment
-(or a profile passed through as --aws-profile).  To score a live bucket listing
-instead of this snapshot, call main.py with --s3-prefix.
+(or a profile passed through as --aws-profile).  To score the corpus named by the
+link sheet, call main.py with --links; to score a live bucket listing, --s3-prefix.
+
+Three files are written: the durable per-window JSONL that --resume reads, the
+flat per-window table for analysis, and the per-video rollup in the original
+flag-manifest schema that calibration and the progress scripts read.
 
 Usage:
     python run.py                       # process full manifest
@@ -20,6 +24,10 @@ cmd = [
     "--manifest",
     "data/manifest.csv",
     "--output",
+    "output/window_metrics.jsonl",
+    "--window-dir",
+    "output/window_metrics",
+    "--video-csv",
     "output/flag_manifest.csv",
     "--resume",
 ]

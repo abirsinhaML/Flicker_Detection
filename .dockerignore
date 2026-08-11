@@ -1,0 +1,21 @@
+# The corpus and its results are mounted, never baked in: the link sheet is 4 MB
+# and output/flag_manifest.csv is 10 MB, and an image carrying a snapshot of
+# either would be stale the moment it was built.
+input/
+output/
+output_old/
+data/
+reports/
+docs/
+tests/
+scripts/
+
+.venv/
+.git/
+.gitignore
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.log

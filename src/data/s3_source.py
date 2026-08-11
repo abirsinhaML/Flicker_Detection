@@ -9,6 +9,7 @@ chain supplies (environment variables, a named profile, or an instance role).
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -86,6 +87,26 @@ def redact_url(value: str) -> str:
     if "?" not in text:
         return text
     return f"{text.split('?', 1)[0]}?<signature-redacted>"
+
+
+# A URL embedded in surrounding prose, up to the first whitespace or quote.
+_EMBEDDED_URL = re.compile(r"(https?://[^\s'\"]+?)\?[^\s'\"]*")
+
+
+def redact_text(value: str) -> str:
+    """Strip the query string from every URL inside a larger piece of text.
+
+    FFmpeg reports a failed open by quoting the whole URL back, so an error
+    message is where a signed URL escapes: unlike a log line, that message is
+    persisted, as the ``error`` field of the video's output record.  The
+    signature is a bearer credential for the object, and one written to an
+    output file outlives the run that produced it.
+
+    Distinct from :func:`redact_url` because this must not truncate at the first
+    ``?`` -- that character occurs in ordinary error prose, and cutting there
+    would discard the part of the message worth keeping.
+    """
+    return _EMBEDDED_URL.sub(r"\1?<signature-redacted>", str(value))
 
 
 # Cached per process.  boto3 clients are neither picklable nor safe to share
@@ -185,12 +206,6 @@ class S3VideoCatalog:
             presign_expiry=presign_expiry,
         )
 
-    @classmethod
-    def from_uri(cls, uri: str, **kwargs: Any) -> S3VideoCatalog:
-        """Build a catalog from an ``s3://bucket/prefix`` listing root."""
-        location = parse_s3_uri(uri, require_key=False)
-        return cls(location.bucket, location.key, **kwargs)
-
     @property
     def client(self) -> Any:
         return s3_client(region=self.resolver.region, profile=self.resolver.profile)
@@ -265,7 +280,6 @@ class S3Settings:
 
     bucket: str | None = None
     prefix: str = ""
-    prefixes: tuple[str, ...] = ()
     region: str | None = DEFAULT_REGION
     profile: str | None = None
     presign_expiry_seconds: int = DEFAULT_PRESIGN_EXPIRY
@@ -276,14 +290,9 @@ class S3Settings:
         """Read settings from a loaded detector config, tolerating absence."""
         section = config.get("s3") or {}
         extensions = section.get("extensions") or DEFAULT_VIDEO_EXTENSIONS
-        
-        raw_prefixes = section.get("prefixes")
-        prefixes = tuple(str(p) for p in raw_prefixes) if isinstance(raw_prefixes, list) else ()
-        
         return cls(
             bucket=section.get("bucket"),
             prefix=str(section.get("prefix") or ""),
-            prefixes=prefixes,
             region=section.get("region") or DEFAULT_REGION,
             profile=section.get("profile"),
             presign_expiry_seconds=int(
@@ -326,14 +335,6 @@ class S3Settings:
             extensions=self.extensions,
             presign_expiry=self.presign_expiry_seconds,
         )
-
-    def catalogs(self, listing_root: str | None = None) -> list[S3VideoCatalog]:
-        """Build catalogs for the listing_root, or all configured prefixes."""
-        if listing_root:
-            return [self.catalog(listing_root)]
-        if self.prefixes:
-            return [self.catalog(p) for p in self.prefixes]
-        return [self.catalog()]
 
 
 def _credential_hint(action: str, error: Exception) -> str:

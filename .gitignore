@@ -35,7 +35,8 @@ output/*
 reports/*
 !reports/calibration_report.md
 results/
-
+output_old/
+tests/
 # Video files (avoid committing large media)
 *.mp4
 *.avi
@@ -54,3 +55,4 @@ pip-log.txt
 
 # Logs
 *.log
+tests/

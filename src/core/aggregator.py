@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
+from typing import Protocol
 
 import numpy as np
 
@@ -13,6 +14,14 @@ from src.core.types import VideoMetrics
 
 ScoreNormalizer = Callable[[object], float]
 logger = logging.getLogger(__name__)
+
+
+class Scored(Protocol):
+    """Anything carrying a window score, so the rollup accepts either the bare
+    :class:`WindowMetrics` or the fuller :class:`~src.core.types.WindowRecord`
+    that is now reported."""
+
+    score: float
 
 
 @dataclass(slots=True)
@@ -70,12 +79,16 @@ class DetectionAggregator:
         logger.debug("Aggregated window score=%.3f scores=%s", metrics.score, detector_scores)
         return metrics
 
-    def aggregate_video(self, windows: Sequence[WindowMetrics]) -> VideoMetrics:
+    def aggregate_video(self, windows: Sequence[Scored]) -> VideoMetrics:
         """Summarize window scores without diluting isolated strong evidence."""
         if not windows:
             raise ValueError("Cannot aggregate a video without sampled windows")
 
-        scores = np.asarray([window.score for window in windows], dtype=np.float32)
+        # float64, so the reported maximum is *exactly* one of the window scores
+        # rather than its float32 rounding.  Both numbers are now published side
+        # by side, and a consumer checking that the video score is one of its
+        # windows would otherwise see a spurious ~1e-8 mismatch.
+        scores = np.asarray([window.score for window in windows], dtype=np.float64)
         metrics = VideoMetrics(
             max_score=float(np.max(scores)),
             mean_score=float(np.mean(scores)),

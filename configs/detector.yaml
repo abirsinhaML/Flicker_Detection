@@ -12,17 +12,39 @@ s3:
 
 sampling:
   window_duration: 3.0
-  stride: 20.0
-  overlap: 0.0
-  min_window_duration: 2.0
-  mode: uniform
+  # null = contiguous: the stride equals the window, so the schedule tiles the
+  # video end to end and no moment between the first and last window goes
+  # unmeasured. A 10-minute video is 200 windows of 3 s rather than 31 samples.
+  #
+  # Written as null rather than as 3.0 so the two cannot drift: changing
+  # window_duration alone used to silently reintroduce gaps.
+  #
+  # This is a coverage-for-cost trade and both sides are large. The previous
+  # 20 s stride measured 15.5% of a video; contiguous measures all of it, so
+  # decode work and S3 egress rise by ~6.5x per video. It also changes
+  # `flicker_score`, which is a maximum over windows: taking it over ~200 draws
+  # instead of ~31 shifts it upward for the same footage, so `decision`
+  # thresholds fitted against 31-window scores now band more videos as mild.
+  # Re-fit `decision` before trusting the routes, and do not compare scores
+  # across the two settings.
+  #
+  # A stride larger than window_duration goes back to sampling: cheaper, but an
+  # artifact can fall entirely between two windows.
+  stride: null
+  # NOTE: WindowSampler accepts window_duration and stride only. `overlap`,
+  # `min_window_duration`, and `mode` used to sit here and were read by nothing,
+  # so tuning them changed no behaviour silently; they have been removed rather
+  # than left as a trap.
   resize: [320, 180]
 
 # How frames are turned back into pixels. Decoding is this pipeline's entire
 # cost: the analysed signal is 320x180, but the sources are 3840x2880 at 29.97
 # fps, so libavcodec spends far more CPU reconstructing frames than the
 # detectors spend measuring them. On one 3s window of 4K H.264, software decode
-# costs 1.65 s of CPU against 0.33 s for NVDEC.
+# costs ~4.1 s of CPU against ~0.54 s for NVDEC with its own downscale, and
+# ~0.24 s for every detector and feature combined. These are the figures
+# measured in src/data/decode.py's module docstring; the 1.65 s / 0.33 s pair
+# previously quoted here was from an earlier, smaller test clip.
 decode:
   # auto = NVDEC when the driver, codec, and resolution allow, software
   # otherwise. cuda = insist on NVDEC (still falls back unless allow_fallback
@@ -159,3 +181,19 @@ decision:
   # them, whereas an over-called reject is acted on unseen. Worth revisiting
   # once the larger hand-labelled set exists.
   extreme_threshold: 0.51
+
+  # Per-window boundaries, used to grade each window in its own right. Separate
+  # from the video thresholds above because the two quantities are not drawn from
+  # the same distribution: a video score is the maximum over ~31 windows, which
+  # sits far up the per-window distribution. Bootstrapping the clean
+  # ground-truth clips puts the median of max-of-15 at 0.0164 against 0.0005 for
+  # a single window, so a boundary fitted against video maxima is systematically
+  # too high to apply to one window and the window bands read conservatively.
+  #
+  # Left equal to the video thresholds on purpose: that keeps one documented
+  # number rather than inventing a second, unfitted one. Fit these against
+  # window-level labels when they exist -- the fitting needs labels on windows,
+  # not on videos, and no such set exists yet.
+  window:
+    mild_threshold: 0.328
+    extreme_threshold: 0.51

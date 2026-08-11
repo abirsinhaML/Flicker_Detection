@@ -231,19 +231,3 @@ class FrequencyAnalyzer:
     def _validate_fps(fps: float) -> None:
         if not isfinite(fps) or fps <= 0:
             raise ValueError("fps must be a finite value greater than zero")
-
-    @staticmethod
-    def _empty_features(
-        frequencies: np.ndarray,
-        psd: np.ndarray,
-        modulation_depth: float = 0.0,
-    ) -> FrequencyFeatures:
-        return FrequencyFeatures(
-            frequencies=frequencies,
-            psd=psd,
-            dominant_frequency=0.0,
-            dominant_power=0.0,
-            peak_prominence=0.0,
-            peak_to_median_ratio=0.0,
-            modulation_depth=modulation_depth,
-        )
