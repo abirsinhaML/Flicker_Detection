@@ -95,15 +95,26 @@ VIDEO_CSV="${VIDEO_CSV:-$SHARD_DIR/$SHARD.csv}"
 WINDOW_DIR="${WINDOW_DIR:-$OUTPUT_ROOT/window_metrics}"
 LOG="${LOG:-$SHARD_DIR/$SHARD.log}"
 
-# Two per core on both backends; see the note above.  WORKERS_ORIGIN is carried so
-# the header can say whether the number came from the environment or from here: an
+# Two per core on both backends; see the note above.
+#
+# nproc is asked with OMP_NUM_THREADS and OMP_THREAD_LIMIT cleared, because
+# coreutils nproc *honours* them: it returns the minimum of the real CPU count
+# and OMP_NUM_THREADS.  This script exports OMP_NUM_THREADS=1 a few lines below,
+# so any shell that has run it before -- or sourced it, or set the variable for
+# any other reason -- reports one core, and the default silently collapses from
+# 32 workers to 2.  That is exactly what happened on a 16-core box.  Clearing the
+# variables for this one call keeps the answer affinity-aware (a genuinely
+# restricted cpuset still counts correctly) while ignoring the thread pinning.
+CORES=$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)
+
+# WORKERS_ORIGIN is carried so the header can say where the number came from: an
 # exported WORKERS from an earlier command silently beats this default, which has
 # already cost one run its parallelism.
 if [ -n "${WORKERS:-}" ]; then
     WORKERS_ORIGIN="WORKERS from the environment"
 else
-    WORKERS=$(( $(nproc) * 2 ))
-    WORKERS_ORIGIN="default: $(nproc) cores x 2"
+    WORKERS=$(( CORES * 2 ))
+    WORKERS_ORIGIN="default: $CORES cores x 2"
 fi
 
 # A second batch writing the same shard, or a previous run's orphans stealing
