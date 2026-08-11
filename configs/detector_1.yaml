@@ -10,7 +10,8 @@ s3:
     - raw/collector_app/
     - raw/dataset_test/
     - raw/Delhi_Zetwork/2026-06-27/
-    - raw/Delhi_ZetWork/
+    - raw/Delhi_ZetWork/Night Shift/
+    - raw/Delhi_ZetWork/Untagged/
 
   # Single prefix (used only if prefixes is not set or empty)
   prefix: raw/2026-05-16/mirana_test/
