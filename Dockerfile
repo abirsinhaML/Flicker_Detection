@@ -1,40 +1,34 @@
-# Flicker detection, reproducibly.
+# Flicker detection, one container per shard.
 #
 # The image needs no FFmpeg and no CUDA toolkit. PyAV's wheel vendors its own
 # FFmpeg (libavcodec 62 and 31 companion libraries), and its NVDEC support comes
 # from that build rather than from anything installed here -- it dlopens
 # libnvcuvid.so from the *host* driver at run time. So the container carries the
-# codec stack and the host supplies only the driver, which is what makes a plain
-# slim base sufficient and keeps the image small.
+# codec stack, the host supplies only the driver, and a plain slim base is enough.
 #
-# Build:
+# See DOCKER.md for the full run book. In short:
+#
 #   docker build -t flicker:0.2.0 .
+#   docker run -d --name flicker --restart unless-stopped --gpus all \
+#     -v /data/input:/app/input:ro -v /data/output:/app/output \
+#     flicker:0.2.0 --from-row 0 --to-row 23170
 #
-# Run with the GPU (needs nvidia-container-toolkit on the host):
-#   docker run --rm --gpus all \
-#     -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
-#     -v "$PWD/output:/app/output" -v "$PWD/input:/app/input:ro" \
-#     flicker:0.2.0 --links --workers 8 --resume
-#
-# Run without a GPU -- the same command, no --gpus:
-#   docker run --rm -e AWS_ACCESS_KEY_ID ... flicker:0.2.0 --links --workers 16
-#
-# VERIFY NVDEC IS ACTUALLY BEING USED. A container that cannot reach the driver
-# falls back to software and only says so in one log line, which at corpus scale
-# means quietly spending ~6x the CPU. Prove it before a long run:
-#   docker run --rm --gpus all flicker:0.2.0 --decode-backend cuda \
-#     s3://bucket/key.mp4 --output /tmp/probe.jsonl --no-window-dir --no-video-csv
-# and check the metadata line says `decode=cuda`. Setting
-# `decode.allow_fallback: false` turns a missing GPU into a hard failure, which
-# is what you want in a smoke test and never in production.
+# The entry point is scripts/run_batch.sh, so container arguments are the shard's
+# row range and nothing else. That script pins the thread environment, picks a
+# worker count, checks S3 credentials before decoding anything, and names its
+# outputs after the range -- all of which would have to be reproduced by hand if
+# the entry point were main.py directly.
 
 FROM python:3.10-slim-bookworm
 
-# libnvcuvid/libnvidia-encode arrive from the host via the container toolkit, so
-# only the ordinary shared libraries PyAV and OpenCV link against are needed.
+# libgl1/libglib2.0-0: OpenCV's runtime dependencies.
+# procps: run_batch.sh and stop_batch.sh identify the batch with `ps`, which the
+#         slim base does not ship; without it the guard fails under `set -e`
+#         before any work starts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -46,18 +40,31 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev
 
-COPY main.py run.py ./
+COPY main.py run.py upload_output.py ./
 COPY src/ ./src/
 COPY configs/ ./configs/
+COPY scripts/ ./scripts/
 
-# Written to by the batch, and the mount point for results.
-RUN mkdir -p output reports
+# Mount points. input/ holds the link sheet and is read-only; output/ must be a
+# volume or the results die with the container.
+RUN mkdir -p input output reports && chmod +x scripts/*.sh scripts/*.py
 
-ENV PATH="/app/.venv/bin:$PATH" \
+# NumPy is on scipy-openblas, which spawns one thread per core in *every* worker.
+# Unpinned, the detector stage measured 20.4 ms wall / 308 ms CPU across 15.1
+# threads; pinned it is 10.6 ms wall / 10.6 ms CPU -- faster and 29x cheaper,
+# because the thread thrash cost more than the parallelism bought. Scores are
+# bit-identical either way. run_batch.sh exports these too; setting them here as
+# well means they hold even if the entry point is overridden.
+ENV OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    OPENCV_FOR_THREADS_NUM=1 \
+    PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Arguments go straight through, so the container is the CLI:
-#   docker run ... flicker:0.2.0 --links --workers 8 --resume
-ENTRYPOINT ["python", "main.py"]
-CMD ["--help"]
+# Arguments are passed through to run_batch.sh, and from there to main.py:
+#   docker run ... flicker:0.2.0 --from-row 0 --to-row 23170
+#   docker run ... flicker:0.2.0 --from-row 0 --to-row 99 --no-s3-output
+ENTRYPOINT ["scripts/run_batch.sh"]

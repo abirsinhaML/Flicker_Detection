@@ -1,6 +1,9 @@
 # The corpus and its results are mounted, never baked in: the link sheet is 4 MB
-# and output/flag_manifest.csv is 10 MB, and an image carrying a snapshot of
-# either would be stale the moment it was built.
+# and the results grow to gigabytes, and an image carrying a snapshot of either
+# would be stale the moment it was built.
+#
+# scripts/ IS copied in -- run_batch.sh is the entry point, and batch_procs.sh and
+# stop_batch.sh go with it.
 input/
 output/
 output_old/
@@ -8,7 +11,6 @@ data/
 reports/
 docs/
 tests/
-scripts/
 
 .venv/
 .git/
