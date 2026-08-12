@@ -1,76 +1,319 @@
 # Flicker Artifact Detection
 
-Detects illuminant flicker, rolling horizontal bands, and AWB/AE hunting in egocentric video.
-The implementation uses windowed PyAV decoding, `320×180` downsampling, shared
-signal extraction, Welch PSD, row-profile motion measurements, and parallel
-manifest batch processing with `ProcessPoolExecutor`.
+Detects illuminant flicker, rolling horizontal bands, and AWB/AE hunting in
+egocentric video. Windowed PyAV decoding at `320×180`, shared signal extraction,
+Welch PSD, row-profile band measurement, and parallel batch processing.
 
-## Run it with Docker
+The job: score 140,519 videos (28,216 hours) held in S3, and report a flicker
+score for **every three-second window** of every video — 200 windows for a
+ten-minute video, not one summary row.
 
-The supported way to run this at scale. One container per shard; the shard count is
-whatever your capacity allows. **[DOCKER.md](DOCKER.md) is the full run book** —
-IAM policy, ECR push, monitoring, troubleshooting. The short version:
+- **[Quick start](#quick-start)** — six steps, Docker
+- **[How input and output work](#how-input-and-output-work)** — read this before a
+  long run
+- **[DOCKER.md](DOCKER.md)** — the operator's run book: IAM, ECR, monitoring,
+  troubleshooting
+
+---
+
+## How input and output work
+
+### Input: a spreadsheet names the corpus
+
+The work set is `input/all_s3links_updated.xlsx` (committed, 3.8 MB), one row per
+video:
+
+| project_name | video_id | video_s3_link | duration_s |
+|---|---|---|---|
+| Mirana | gx020033 | `raw/mirana/2026-05-21/mirana_294_gx020033/gx020033.mp4` | 521.52 |
+
+`video_s3_link` is a key under `s3.bucket` (`prod-egocentric-humyn-data`). The
+sheet defines the work set, so the corpus is a fixed reviewable list rather than
+whatever a bucket prefix happens to hold at listing time.
+
+**One reconciliation happens automatically.** The sheet's links are lowercased and
+S3 keys are case-sensitive, so joining bucket and column verbatim 404s on *every*
+row. Each run lists the bucket once (~30 s) to recover the real casing:
+
+```
+raw/delhi_zetwork/2026-06-26/el0706/gx010086.mp4      <- the sheet
+raw/Delhi_ZetWork/2026-06-26/EL0706/GX010086.MP4      <- the object
+```
+
+140,335 of 140,519 rows (99.87%) resolve to exactly one object. The remaining 184
+are skipped and listed with reasons in `reports/link_resolution.md` — 180 name
+objects the bucket no longer holds, 4 are ambiguous between two objects differing
+only in case. Nothing is guessed at. See
+[Link casing](#link-casing-is-reconciled-against-the-bucket).
+
+Videos are never downloaded whole: each worker signs a short-lived URL and FFmpeg
+reads the object over HTTP range requests.
+
+### Output: three artifacts, written locally and copied to S3
+
+Results are written to the local `output/` volume **first** — that is the source of
+truth — and copied to
+`s3://stage-egocentric-humyn-data/flicker_results/` as they land. A failed or
+forbidden upload therefore costs the copy, never the run's work.
+
+```
+output/                                    s3://…/flicker_results/
+├── shards/rows_0000000-0006649.jsonl      ├── shards/rows_0000000-0006649.jsonl
+├── shards/rows_0000000-0006649.csv        ├── shards/rows_0000000-0006649.csv
+├── shards/rows_0000000-0006649.log        │   (log stays local)
+└── window_metrics/                        └── window_metrics/
+    └── raw/<video key path>.csv               └── raw/<video key path>.csv
+```
+
+| artifact | unit | what it is |
+|---|---|---|
+| `shards/<range>.jsonl` | one line per video | **the durable record.** Nested: the video rollup plus every window with its raw measurements. `--resume` reads this. |
+| `shards/<range>.csv` | one row per video | the rollup — score, band, route, worst window |
+| `window_metrics/…/<video>.csv` | one CSV per video | that video's windows, at the video's own key path, so a result is addressed exactly like the video it describes |
+| `shards/<range>.log` | — | the run log, local only |
+
+Why JSONL is the durable one: a video is written in a single atomic append, so a
+batch killed mid-run never leaves a half-written video and `--resume` keeps its
+per-video granularity. Full field list and invariants in
+[Output schema](#output-schema).
+
+**Upload timing differs by artifact, and it matters.** Per-video window CSVs are
+copied up as each video finishes. The shard `.jsonl` and `.csv` are appended to for
+the whole run and are copied **only when the batch finishes** — re-sending a
+multi-gigabyte file after every video would cost more than the batch. On a
+multi-day shard, sync periodically:
 
 ```bash
-# 1. build (verified: builds clean, 1.28 GB)
+python upload_output.py --skip-existing --skip detector.log
+```
+
+`--skip-existing` compares object size and skips unchanged files, so after the
+first pass it sends only what grew. `DOCKER.md` has this as an hourly cron.
+
+### How the work is divided
+
+One container per **shard**, where a shard is an inclusive row range of the sheet
+(`--from-row` / `--to-row`). The shard count is yours to choose — six instances or
+twenty, the ranges tile the sheet exactly either way.
+
+All shards write into one `flicker_results/` prefix and share `window_metrics/`.
+That is safe: shard files are named after their range, and per-video files are
+keyed by video, so no two shards can ever write the same file.
+
+---
+
+## Quick start
+
+Six steps. Everything is Docker; see
+[Running without Docker](#running-without-docker) for the development path.
+
+### 1. Grant access
+
+The identity the container runs as needs to read the corpus and write the results:
+
+```json
+[
+  { "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:ListBucket"],
+    "Resource": ["arn:aws:s3:::prod-egocentric-humyn-data",
+                 "arn:aws:s3:::prod-egocentric-humyn-data/*"] },
+  { "Effect": "Allow",
+    "Action": "s3:PutObject",
+    "Resource": "arn:aws:s3:::stage-egocentric-humyn-data/flicker_results/*" }
+]
+```
+
+Attach it as an **IAM instance profile**, not exported keys: a shard runs for days
+and STS/SSO tokens expire in hours, and when they do the batch stops being able to
+read the corpus, not just to upload.
+
+**Then raise the IMDSv2 hop limit to 2.** A container sits one network hop further
+from the metadata service than the host, and the default of 1 silently blocks it —
+you get `Unable to locate credentials` *with a role correctly attached*:
+
+```bash
+aws ec2 modify-instance-metadata-options --instance-id i-xxxxxxxx \
+  --http-put-response-hop-limit 2 --http-tokens required
+```
+
+### 2. Build the image
+
+```bash
+git clone https://github.com/abirsinhaML/Flicker_Detection.git
+cd Flicker_Detection
 docker build -t flicker:0.2.0 .
+```
 
-# 2. work out the row ranges for N instances. Needs no AWS credentials.
-docker run --rm -v "$PWD/input:/app/input:ro" --entrypoint python \
-  flicker:0.2.0 main.py --links --print-shards 20
+Verified to build clean on Ubuntu 24.04 / Docker 29.1; 1.28 GB. Needs no FFmpeg or
+CUDA toolkit on the host — PyAV's wheel vendors its own FFmpeg and NVDEC support
+comes from that build, loading `libnvcuvid.so` from the host driver at run time.
 
-# 3. run one shard per instance, substituting its range
+For a fleet, build once and push to ECR instead of building on every instance
+(commands in [DOCKER.md](DOCKER.md)). If a machine cannot build or pull, move the
+image as a file:
+
+```bash
+docker save flicker:0.2.0 | gzip > flicker-0.2.0.tar.gz    # ~500 MB
+docker load < flicker-0.2.0.tar.gz                          # on the target
+```
+
+### 3. Stage the input and output directories
+
+```bash
 mkdir -p /data/input /data/output
 cp input/all_s3links_updated.xlsx /data/input/
+```
 
+The link sheet is deliberately **not** baked into the image, and `output/` must be
+a volume or results die with the container.
+
+### 4. Work out the shard ranges
+
+Pick N from the capacity you have. This needs no AWS credentials:
+
+```bash
+docker run --rm -v /data/input:/app/input:ro --entrypoint python \
+  flicker:0.2.0 main.py --links --print-shards 20
+```
+
+```
+  shard   --from-row     --to-row       rows     hours
+      0            0         6649      6,650    1,411h
+      1         6650        12060      5,411    1,410h
+     ...
+     19       132135       140518      8,384    1,411h
+
+  covers 140,519 of 140,519 rows, no overlap, no gap
+```
+
+Row counts differ on purpose: the split balances **hours of video**, because decode
+is ~94% of the cost so hours predict runtime and row counts do not. Split by row
+count, the heaviest shard carries ~1.2× the hours of the lightest and that instance
+is still running when the rest have finished.
+
+Rough sizing at a measured ~10.6× realtime per single-GPU box:
+
+| shards | hours each | ~days each |
+|---|---|---|
+| 6 | 4,700 | 20 |
+| 20 | 1,410 | 6 |
+| 40 | 705 | 3 |
+
+Add `--shard-format tsv` to drive a launcher loop instead of retyping ranges —
+there is one in [DOCKER.md](DOCKER.md).
+
+### 5. Smoke-test before committing days
+
+Ten rows, finishes in minutes, exercises credentials, GPU detection, S3 write
+access and both output paths:
+
+```bash
+docker run --rm --gpus all \
+  -v /data/input:/app/input:ro -v /data/output:/app/output \
+  flicker:0.2.0 --from-row 0 --to-row 9
+```
+
+Check three things in the output:
+
+- `Verified write access to s3://stage-egocentric-humyn-data/flicker_results/`
+- `decode=cuda` on the metadata lines — **`decode=cpu` means `--gpus all` did not
+  work**, and it will run correctly at ~6× the CPU
+- `workers: 32 (default: 16 cores x 2)` — the header states the count and where it
+  came from
+
+Expect **4 of those 10 to score and 6 to be skipped**. Rows 0–9 sit in a stretch of
+the sheet naming objects the bucket no longer holds. Normal for that slice;
+corpus-wide the miss rate is 0.13%.
+
+### 6. Run the shards
+
+One per instance, substituting its range from step 4:
+
+```bash
 docker run -d --name flicker --restart unless-stopped --gpus all --init \
   -v /data/input:/app/input:ro \
   -v /data/output:/app/output \
   flicker:0.2.0 --from-row 0 --to-row 6649
 ```
 
-A container's arguments are the row range and nothing else. Output paths, worker
+A container's arguments are the row range and nothing else — output paths, worker
 count, thread pinning, `--resume` and the S3 destination are all handled inside.
 
-Reads the corpus from `s3://prod-egocentric-humyn-data/raw/…`; writes results to
-the `output/` volume **and** to `s3://stage-egocentric-humyn-data/flicker_results/`.
+To run several shards on one host, give each a distinct range and its own name, and
+add `-e ALLOW_CONCURRENT=1`.
+
+### Monitoring, stopping, resuming
 
 ```bash
-docker logs -f flicker                                     # live output
-docker exec flicker python scripts/check_progress.py       # progress and ETA
-docker stop -t 60 flicker && docker start flicker          # resumes where it left off
+docker logs -f flicker                                  # live
+docker exec flicker python scripts/check_progress.py    # done / total / rate / ETA
+docker stop -t 60 flicker                               # clean shutdown
+docker start flicker                                    # resumes where it left off
 ```
 
-Two things that cost the most when missed, both covered in DOCKER.md:
+`check_progress.py` reports progress against the *resolvable* count, not the row
+count, so a shard can actually reach 100%:
 
-- **`--gpus all`**, or it silently falls back to software decode at ~6× the CPU.
-  Confirm `decode=cuda` appears in `docker logs`.
-- **The IMDSv2 hop limit must be 2**, or the container cannot see the instance role
-  and reports `Unable to locate credentials` even when one is attached.
+```
+rows_0000000-0006649  rows 0..6649
+  [##......................................]   5.2%
+  scored     341 of 6,602 resolvable   (340 ok, 1 error)
+  rate       98 videos/hour over the last 4.1h
+  remaining  6,261 videos -> ~2.7d at this rate
+```
 
-Smoke-test with ten rows before committing days of compute:
+`--resume` is always on and re-running the identical command is always safe. It
+skips completed videos; granularity is per video, so anything mid-decode when
+stopped is redone from the start — minutes, not hours.
+
+### When the shards finish
+
+Merge the shard records into one rollup; several JSONL files are read in order:
 
 ```bash
-docker run --rm --gpus all -v /data/input:/app/input:ro -v /data/output:/app/output \
-  flicker:0.2.0 --from-row 0 --to-row 9
+python scripts/export_windows.py output/shards/*.jsonl \
+  --videos output/flag_manifest.csv
 ```
+
+`window_metrics/` trees merge by plain copy, since each file is keyed by its video.
+
+> **Before acting on the routes:** `decision.mild_threshold` and
+> `extreme_threshold` were fitted when a video's score was a maximum over 31
+> sampled windows. It is now a maximum over ~200 contiguous windows, which shifts
+> the score upward for identical footage — on one measured video enough to turn
+> `review` into `reject`. Re-fit against contiguous scores before trusting
+> accept/review/reject. Window-level bands are provisional for the same reason; see
+> [Window thresholds](#window-thresholds).
+
+---
 
 ## Running without Docker
 
-For development, or on a box that is already set up. Everything below this section
-assumes this path.
+For development, or a box already set up. `scripts/run_batch.sh` is exactly what
+the container's entry point runs, so both paths behave identically — same thread
+pinning, worker default, output layout and `--resume`.
 
 ```bash
 uv sync --locked
 export AWS_ACCESS_KEY_ID="..." AWS_SECRET_ACCESS_KEY="..." AWS_SESSION_TOKEN="..."
 
-scripts/run_batch.sh --from-row 0 --to-row 6649      # one shard
 uv run python main.py --links --print-shards 20      # the ranges
+scripts/run_batch.sh --from-row 0 --to-row 6649      # one shard
+scripts/stop_batch.sh                                # stop (never kill <pid>)
+.venv/bin/python scripts/check_progress.py           # progress
 ```
 
-`scripts/run_batch.sh` is what the container's entry point runs, so the two paths
-behave identically: same thread pinning, same worker default, same output layout,
-same `--resume`.
+In tmux, so it survives logout:
+
+```bash
+tmux new -s flicker
+scripts/run_batch.sh --from-row 0 --to-row 6649
+# Ctrl-B then D to detach; tmux attach -t flicker to return
+```
+
+Export credentials **before** `tmux new`, and `unset WORKERS` if an earlier command
+exported it — a stale `WORKERS=2` silently overrides the default and costs a run
+its parallelism.
 
 ## Data access
 
