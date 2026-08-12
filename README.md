@@ -359,26 +359,34 @@ ranges are stable: rows that turn out to be unresolvable leave their instance wi
 less to do rather than shifting every later boundary.
 
 Don't type the ranges — have them computed, because a hand-made off-by-one leaves
-a silent gap in the corpus or scores videos twice:
+a silent gap in the corpus or scores videos twice. The shard count is yours to
+choose; the ranges tile exactly for any N:
 
 ```bash
-uv run python main.py --links --print-shards 10
+uv run python main.py --links --print-shards 20
 ```
 
 ```
-140,519 rows in input/all_s3links_updated.xlsx -> 10 shards
+140,519 rows in input/all_s3links_updated.xlsx -> 20 shards, balanced by duration
+28,216 hours of video total
 
-  # instance 0  (14,052 rows)
-  scripts/run_batch.sh --links input/all_s3links_updated.xlsx --from-row 0 --to-row 14051
+  shard   --from-row     --to-row       rows     hours
+  ----------------------------------------------------
+      0            0         6649      6,650    1,411h
+      1         6650        12060      5,411    1,410h
+      ...
+     19       132135       140518      8,384    1,411h
 
-  # instance 1  (14,052 rows)
-  scripts/run_batch.sh --links input/all_s3links_updated.xlsx --from-row 14052 --to-row 28103
-  ...
-  covers 140,519 of 140,519 rows, no overlap
+  covers 140,519 of 140,519 rows, no overlap, no gap
 ```
 
-Run one line per instance. Each writes its own records and rollup, named for the
-range:
+Row counts differ on purpose — the split balances *hours of video*, since decode
+dominates the cost. `--shard-by rows` gives equal row counts instead, at ~1.2×
+imbalance in hours. `--shard-format tsv` prints `index<TAB>from<TAB>to` for a
+launcher to read in a loop.
+
+Run one shard per instance with `scripts/run_batch.sh --from-row A --to-row B`.
+Each writes its own records and rollup, named for the range:
 
 ```
 output/shards/rows_0000000-0014051.jsonl     # per instance

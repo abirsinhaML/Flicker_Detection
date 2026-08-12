@@ -802,23 +802,27 @@ def _print_window_summary(result: VideoResult) -> None:
 
 
 def print_shards(arguments: argparse.Namespace, config: dict[str, Any]) -> None:
-    """Print the row ranges that tile the input into N shards, and how to run them.
+    """Print the row ranges that tile the input into N shards.
 
-    Counting the rows here rather than leaving it to the operator is the point:
-    the ranges are derived from the file that will actually be read, so they
-    cannot drift from it.
+    The shard count is whatever the operator asks for: how many instances are
+    available is their decision, and hard-coding a number into the repo only means
+    the two disagree later.  Counting the rows here rather than leaving it to them
+    is the point -- the ranges are derived from the file that will actually be
+    read, so they cannot drift from it.
+
+    ``--shard-format tsv`` emits ``index<TAB>from<TAB>to`` and nothing else, so a
+    launcher can read it in a loop instead of the ranges being retyped, which is
+    where fleet gaps and double-scoring come from.
     """
     if arguments.links is not None:
         source = _links_path(arguments, config, None)
         reader = LinkSheetReader(source)
-        frame, flag = reader.frame, f"--links {source}"
-        durations = (
-            frame[reader.duration_column].tolist() if reader.duration_column else []
-        )
+        frame = reader.frame
+        durations = frame[reader.duration_column].tolist() if reader.duration_column else []
     elif arguments.manifest:
         source = arguments.manifest
         manifest = ManifestReader(source)
-        frame, flag = manifest.df, f"--manifest {source}"
+        frame = manifest.df
         durations = frame["duration_s"].tolist() if "duration_s" in frame.columns else []
     else:
         raise SystemExit("--print-shards needs --links or --manifest")
@@ -834,21 +838,28 @@ def print_shards(arguments: argparse.Namespace, config: dict[str, Any]) -> None:
         ranges = shard_ranges(total, arguments.print_shards)
         basis = "balanced by row count"
 
+    if arguments.shard_format == "tsv":
+        for index, (first, last) in enumerate(ranges):
+            print(f"{index}\t{first}\t{last}")
+        return
+
     total_hours = sum(durations) / 3600 if durations else 0.0
     print(f"\n{total:,} rows in {source} -> {len(ranges)} shards, {basis}")
     if total_hours:
-        print(f"{total_hours:,.0f} hours of video\n")
+        print(f"{total_hours:,.0f} hours of video total\n")
+    header = f"  {'shard':>5}  {'--from-row':>11}  {'--to-row':>11}  {'rows':>9}"
+    if durations:
+        header += f"  {'hours':>8}"
+    print(header)
+    print(f"  {'-' * (len(header) - 2)}")
     for index, (first, last) in enumerate(ranges):
-        detail = f"{last - first + 1:,} rows"
+        line = f"  {index:>5}  {first:>11}  {last:>11}  {last - first + 1:>9,}"
         if durations:
-            hours = sum(durations[first : last + 1]) / 3600
-            detail += f", {hours:,.0f} h"
-        print(
-            f"  # instance {index}  ({detail})\n"
-            f"  scripts/run_batch.sh {flag} --from-row {first} --to-row {last}\n"
-        )
+            line += f"  {sum(durations[first : last + 1]) / 3600:>7,.0f}h"
+        print(line)
     covered = sum(last - first + 1 for first, last in ranges)
-    print(f"  covers {covered:,} of {total:,} rows, no overlap\n")
+    print(f"\n  covers {covered:,} of {total:,} rows, no overlap, no gap")
+    print("  machine-readable: add --shard-format tsv\n")
 
 
 def main() -> None:
@@ -978,6 +989,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--shard-format",
+        choices=("human", "tsv"),
+        default="human",
+        help=(
+            "human (default) prints a table; tsv prints 'index<TAB>from<TAB>to' "
+            "and nothing else, for a launcher to read in a loop"
+        ),
+    )
+    parser.add_argument(
         "--shard-by",
         choices=("duration", "rows"),
         default="duration",
@@ -1076,7 +1096,14 @@ def main() -> None:
     video_csv = None if arguments.no_video_csv else arguments.video_csv
     window_dir = None if arguments.no_window_dir else arguments.window_dir
     publisher = None
-    destination = None if arguments.no_s3_output else _s3_output(arguments, config)
+    # Only the modes that actually score videos publish anything, and the write
+    # check costs a request: --print-shards and --write-manifest upload nothing, so
+    # requiring write credentials for them would block the very command an operator
+    # runs first, before any credentials are arranged.
+    scoring = not (arguments.print_shards or arguments.write_manifest or arguments.calibrate_labels)
+    destination = (
+        None if arguments.no_s3_output or not scoring else _s3_output(arguments, config)
+    )
     if destination:
         settings = S3Settings.from_config(config)
         section = config.get("s3") or {}
