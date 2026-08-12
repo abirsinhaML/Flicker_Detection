@@ -946,10 +946,16 @@ def main() -> None:
         "--s3-output",
         help=(
             "Also copy results to this s3://bucket/prefix, mirroring the local "
-            "output layout. Results are written locally first, so a failed "
-            "upload never costs the run's work. Needs s3:PutObject on the "
-            "prefix; nothing outside it is ever written, and nothing is deleted."
+            "output layout. Defaults to s3.output in the config. Results are "
+            "written locally first, so a failed upload never costs the run's "
+            "work. Needs s3:PutObject on the prefix; nothing outside it is ever "
+            "written, and nothing is deleted."
         ),
+    )
+    parser.add_argument(
+        "--no-s3-output",
+        action="store_true",
+        help="Keep results local even though s3.output is set in the config",
     )
     parser.add_argument(
         "--s3-output-dry-run",
@@ -1070,13 +1076,22 @@ def main() -> None:
     video_csv = None if arguments.no_video_csv else arguments.video_csv
     window_dir = None if arguments.no_window_dir else arguments.window_dir
     publisher = None
-    if arguments.s3_output:
+    destination = None if arguments.no_s3_output else _s3_output(arguments, config)
+    if destination:
         settings = S3Settings.from_config(config)
+        section = config.get("s3") or {}
         publisher = S3Publisher.from_uri(
-            arguments.s3_output,
-            region=settings.region,
+            destination,
+            # The output bucket may live in another region than the corpus, and
+            # SigV4 is region-scoped, so it gets its own setting.
+            region=section.get("output_region") or settings.region,
             profile=settings.profile,
             dry_run=arguments.s3_output_dry_run,
+        )
+        logger.info(
+            "Publishing results to %s%s",
+            publisher.uri,
+            " (dry run)" if arguments.s3_output_dry_run else "",
         )
         # Checked before any decoding, so a read-only role stops the run at the
         # first request instead of after hours of work with nothing uploaded.
@@ -1191,6 +1206,14 @@ def main() -> None:
     except Exception:
         logger.exception("Flicker detection failed")
         raise
+
+
+def _s3_output(arguments: argparse.Namespace, config: dict[str, Any]) -> str | None:
+    """Resolve the upload destination: the flag if given, else ``s3.output``."""
+    if arguments.s3_output:
+        return str(arguments.s3_output)
+    configured = (config.get("s3") or {}).get("output")
+    return str(configured) if configured else None
 
 
 def _links_path(

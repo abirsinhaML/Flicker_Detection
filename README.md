@@ -425,26 +425,36 @@ scripts/run_batch.sh --manifest data/manifest.csv --from-row 0 --to-row 14051
 
 ## Publishing results to S3
 
-**This is optional and off by default** — without `--s3-output` everything stays
-in `output/`, exactly as before. Results are written locally first and copied up,
-so a failed or forbidden upload costs the copy and never the run's work. Add
-`--s3-output` to any run once the write permission below is in place:
+Results are written locally first and copied up, so a failed or forbidden upload
+costs the copy and never the run's work.
 
-```bash
-uv run python main.py --links --config configs/detector_1.yaml \
-  --s3-output s3://prod-egocentric-humyn-data/raw/flicker_result/ \
-  --workers 5 --resume
+The destination lives in the config, so six instances do not each retype it:
+
+```yaml
+s3:
+  output: s3://stage-egocentric-humyn-data/flicker_results/
+  # output_region: ap-south-1   # only if it differs from s3.region
 ```
+
+**Note which bucket is which.** The corpus is *read* from `prod-egocentric-humyn-data`
+and results are *written* to `stage-egocentric-humyn-data`, because the EC2
+instances carry stage credentials: they can write to stage and cannot write to
+prod. `--s3-output` overrides the config for one run; `--no-s3-output` keeps a run
+local only.
 
 The local `output/` layout is reproduced verbatim beneath the prefix:
 
 ```
-s3://prod-egocentric-humyn-data/raw/flicker_result/
-├── window_metrics.jsonl
-├── sample5_flag_manifest.csv
+s3://stage-egocentric-humyn-data/flicker_results/
+├── shards/
+│   ├── rows_0000000-0023170.jsonl     one per instance
+│   └── rows_0000000-0023170.csv
 └── window_metrics/
     └── raw/Delhi_ZetWork/2026-06-20/DV0051/GX010085.csv
 ```
+
+Six instances write six shard files into the same prefix and share the
+`window_metrics/` tree, which is safe because those are keyed by video.
 
 Per-video CSVs go up as each video finishes, so a long batch accumulates results
 remotely as it runs. The JSONL and the rollup CSV are appended to all run and are
@@ -453,7 +463,7 @@ the batch. `scripts/publish_output.py` copies an existing tree up at any time:
 
 ```bash
 uv run python scripts/publish_output.py output \
-  s3://prod-egocentric-humyn-data/raw/flicker_result/ --skip detector.log
+  s3://stage-egocentric-humyn-data/flicker_results/ --skip detector.log
 ```
 
 ### This bucket also holds the corpus
@@ -477,15 +487,14 @@ permission this tool never asks for.
 
 ### Required permission
 
-The `HLProdReadonlyAccess` role cannot write, and the run stops immediately with
-the permission it needs. Grant `s3:PutObject` scoped to the prefix, not the
-bucket:
+The run stops immediately with the permission it needs if it is missing. Grant
+`s3:PutObject` scoped to the prefix, not the bucket:
 
 ```json
 {
   "Effect": "Allow",
   "Action": "s3:PutObject",
-  "Resource": "arn:aws:s3:::prod-egocentric-humyn-data/raw/flicker_result/*"
+  "Resource": "arn:aws:s3:::stage-egocentric-humyn-data/flicker_results/*"
 }
 ```
 

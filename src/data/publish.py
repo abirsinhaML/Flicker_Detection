@@ -41,6 +41,16 @@ _UPLOAD_ERRORS = (ClientError, NoCredentialsError, BotoCoreError, OSError)
 # would need delete permission this tool deliberately never asks for.
 WRITE_CHECK_NAME = ".flicker_write_check"
 
+# What S3 returns when the client signed for the wrong region.  None of them say
+# so, which is why they are named here rather than left to the operator.
+_REGION_ERRORS = frozenset(
+    {
+        "PermanentRedirect",
+        "AuthorizationHeaderMalformed",
+        "IllegalLocationConstraintException",
+    }
+)
+
 
 def parse_destination(uri: str) -> tuple[str, str]:
     """Split ``s3://bucket/prefix`` into its parts, requiring a real prefix.
@@ -131,13 +141,35 @@ class S3Publisher:
             self._client().put_object(Bucket=self.bucket, Key=key, Body=body)
         except _UPLOAD_ERRORS as error:
             raise S3AccessError(
-                f"cannot write to {self.uri}: {error}\n"
-                "The role needs s3:PutObject on "
-                f"arn:aws:s3:::{self.bucket}/{self.prefix}/*. "
-                "Re-run with --s3-output-dry-run to see what would be uploaded, "
-                "or drop --s3-output to keep results local only."
+                f"cannot write to {self.uri}: {error}\n{self._write_hint(error)}"
             ) from error
         logger.info("Verified write access to %s", self.uri)
+
+    def _write_hint(self, error: Exception) -> str:
+        """Name the likely cause, because the two look nothing alike to fix.
+
+        A region mismatch and a missing grant both surface as a failed
+        ``PutObject``, and telling them apart from the raw botocore message is
+        guesswork: SigV4 is region-scoped, so writing to a bucket in another
+        region fails with ``PermanentRedirect`` or a malformed-header error rather
+        than anything mentioning regions.
+        """
+        code = ""
+        if isinstance(error, ClientError):
+            code = str(error.response.get("Error", {}).get("Code", ""))
+        if code in _REGION_ERRORS:
+            return (
+                f"This looks like a region mismatch: the client signed for "
+                f"{self.region!r}. Set s3.output_region in the config to the "
+                f"region of {self.bucket}, which "
+                "`aws s3api get-bucket-location --bucket "
+                f"{self.bucket}` will tell you."
+            )
+        return (
+            f"The role needs s3:PutObject on arn:aws:s3:::{self.bucket}/{self.prefix}/*. "
+            "Re-run with --s3-output-dry-run to see what would be uploaded, or "
+            "--no-s3-output to keep results local only."
+        )
 
     def upload(self, local_path: str | Path, relative_path: str | Path) -> bool:
         """Copy one local file to its key.  Returns whether it was uploaded.

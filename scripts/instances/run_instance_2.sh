@@ -40,8 +40,12 @@
 # --resume is already on, so re-running this exact command after a crash, an
 # expired token, or a reboot continues from the last completed video.
 #
-# To also copy results to S3, append (needs s3:PutObject on the prefix):
-#   --s3-output s3://prod-egocentric-humyn-data/raw/flicker_result/
+# Results are also copied to s3.output in configs/detector_1.yaml -- currently
+#   s3://stage-egocentric-humyn-data/flicker_results/
+# mirroring the local output/ layout.  Write access is checked once before any
+# decoding, so a missing grant stops the run immediately rather than after hours.
+# Pass --no-s3-output to keep this shard local only, or --s3-output-dry-run to
+# print the destination keys without uploading.
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."

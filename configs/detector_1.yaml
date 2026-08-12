@@ -11,6 +11,20 @@ s3:
   # Pass --no-resolve-case once the sheet carries exact keys, or pin the resolved
   # keys with `--links --write-manifest data/manifest.csv` and run --manifest.
   links: input/all_s3links_updated.xlsx
+  # Where results are copied after being written locally. Set here rather than
+  # passed per run, because six instances typing the same URI is six chances to
+  # typo it into a bucket that is not this one. Remove it, or pass
+  # --no-s3-output, to keep results local only.
+  #
+  # NOTE this is the STAGE bucket, and the corpus is read from the PROD bucket
+  # above: the EC2 instances run with stage credentials, which can write here and
+  # cannot write there. Nothing outside `flicker_results/` is ever written and
+  # nothing is deleted -- see src/data/publish.py.
+  output: s3://stage-egocentric-humyn-data/flicker_results/
+  # Region of the *output* bucket, if it differs from `region` above. SigV4 is
+  # region-scoped, so a mismatch fails with PermanentRedirect rather than a clear
+  # message. Leave unset when both buckets are in the same region.
+  # output_region: ap-south-1
   # Listing prefixes are no longer the input; `prefix` is used only by
   # --s3-prefix, which remains for discovering objects the sheet does not name.
   prefix: raw/
