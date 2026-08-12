@@ -49,13 +49,18 @@ COPY scripts/ ./scripts/
 # volume or the results die with the container.
 RUN mkdir -p input output reports && chmod +x scripts/*.sh scripts/*.py
 
+# FLICKER_CONFIG: main.py's --config default. Without it every invocation that
+# bypasses the entry point (--print-shards, for one) would fall back to
+# configs/detector.yaml, which points at the reference corpus and has no s3.links.
+#
 # NumPy is on scipy-openblas, which spawns one thread per core in *every* worker.
 # Unpinned, the detector stage measured 20.4 ms wall / 308 ms CPU across 15.1
 # threads; pinned it is 10.6 ms wall / 10.6 ms CPU -- faster and 29x cheaper,
 # because the thread thrash cost more than the parallelism bought. Scores are
 # bit-identical either way. run_batch.sh exports these too; setting them here as
 # well means they hold even if the entry point is overridden.
-ENV OMP_NUM_THREADS=1 \
+ENV FLICKER_CONFIG=configs/detector_1.yaml \
+    OMP_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1 \

@@ -5,9 +5,12 @@ a row range of the link sheet. **The number of shards is your choice** — pick 
 from the capacity you have, compute the ranges with one command, and the shards
 will tile the corpus with no overlap and no gap whatever N you choose.
 
-**Not yet built or run anywhere.** The Dockerfile is written against verified facts
-about the dependencies, but no `docker build` has been executed — expect to iterate
-once on the first build.
+**Built and exercised.** `docker build` completes clean on Ubuntu 24.04 / Docker
+29.1 (1.28 GB image), NVDEC is present inside the container (`h264_cuvid` built in,
+`cuda` among the hwdevices), and a container has scored real videos end to end
+through this entry point, writing all four output artifacts to a mounted volume.
+Not yet run against a GPU *inside* a container — that needs
+`nvidia-container-toolkit` on the host.
 
 ---
 
@@ -129,6 +132,8 @@ docker run --rm -v /data/input:/app/input:ro --entrypoint python \
   $IMAGE main.py --links --print-shards 20
 ```
 
+(No `--config` needed: the image sets `FLICKER_CONFIG=configs/detector_1.yaml`.)
+
 ```
 140,519 rows in input/all_s3links_updated.xlsx -> 20 shards, balanced by duration
 28,216 hours of video total
@@ -219,6 +224,7 @@ orchestrator — the only contract is that every shard runs exactly once somewhe
 | `BACKEND` | `auto` | `cpu` to force software decode |
 | `ALLOW_CONCURRENT` | `0` | `1` to run more than one container per host |
 | `CONFIG` | `configs/detector_1.yaml` | |
+| `SKIP_S3_CHECK` | `0` | `1` skips the startup credential check. Only for a `--manifest` of local paths, which needs no S3 at all. |
 
 ---
 
@@ -335,6 +341,8 @@ is normal for this slice; corpus-wide the miss rate is 0.13%.
 | `S3 credentials are missing or expired` | The preflight refused to start. Expected with expired STS tokens; use an instance profile. |
 | Container exits immediately | `docker logs <name>`; the startup checks fail loudly and name the problem. |
 | Shard stuck at 0% | Normal for the first ~10 minutes: the bucket is listed once to reconcile link casing before any video is decoded. |
+
+| Files in `/data/output` are owned by `root` | Containers run as root, so the host sees root-owned results. Read them with `sudo`, or run with `--user "$(id -u):$(id -g)"` after `chown`ing the volume to that user. |
 
 Nothing in this pipeline deletes S3 objects, and nothing writes outside
 `flicker_results/` — both are enforced in code, in `src/data/publish.py`.

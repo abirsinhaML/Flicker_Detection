@@ -138,16 +138,25 @@ export OPENCV_FOR_THREADS_NUM=1
 
 # Signing is offline and succeeds even with expired credentials, so without this
 # check the failure would surface as one error row per video instead of once here.
-echo "checking S3 credentials..."
-if ! .venv/bin/python -c "
+#
+# SKIP_S3_CHECK=1 bypasses it for the case the check gets wrong: a --manifest of
+# local paths needs no S3 access at all, and refusing to start then blocks a run
+# that would have worked.
+if [ "${SKIP_S3_CHECK:-0}" = "1" ]; then
+    echo "skipping the S3 credential check (SKIP_S3_CHECK=1)"
+else
+    echo "checking S3 credentials..."
+    if ! .venv/bin/python -c "
 import sys; sys.path.insert(0, '.')
 from main import load_config
 from src.data.s3_source import S3Settings
 S3Settings.from_config(load_config('$CONFIG')).catalog().verify_access()
 " 2>/dev/null; then
-    echo "refusing to start: S3 credentials are missing or expired" >&2
-    echo "  export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=..." >&2
-    exit 1
+        echo "refusing to start: S3 credentials are missing or expired" >&2
+        echo "  export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=..." >&2
+        echo "  (SKIP_S3_CHECK=1 bypasses this, for a --manifest of local paths)" >&2
+        exit 1
+    fi
 fi
 
 mkdir -p "$SHARD_DIR" "$WINDOW_DIR"

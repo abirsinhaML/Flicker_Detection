@@ -5,17 +5,79 @@ The implementation uses windowed PyAV decoding, `320×180` downsampling, shared
 signal extraction, Welch PSD, row-profile motion measurements, and parallel
 manifest batch processing with `ProcessPoolExecutor`.
 
-## Setup
+## Run it with Docker
+
+The supported way to run this at scale. One container per shard; the shard count is
+whatever your capacity allows. **[DOCKER.md](DOCKER.md) is the full run book** —
+IAM policy, ECR push, monitoring, troubleshooting. The short version:
+
+```bash
+# 1. build (verified: builds clean, 1.28 GB)
+docker build -t flicker:0.2.0 .
+
+# 2. work out the row ranges for N instances. Needs no AWS credentials.
+docker run --rm -v "$PWD/input:/app/input:ro" --entrypoint python \
+  flicker:0.2.0 main.py --links --print-shards 20
+
+# 3. run one shard per instance, substituting its range
+mkdir -p /data/input /data/output
+cp input/all_s3links_updated.xlsx /data/input/
+
+docker run -d --name flicker --restart unless-stopped --gpus all --init \
+  -v /data/input:/app/input:ro \
+  -v /data/output:/app/output \
+  flicker:0.2.0 --from-row 0 --to-row 6649
+```
+
+A container's arguments are the row range and nothing else. Output paths, worker
+count, thread pinning, `--resume` and the S3 destination are all handled inside.
+
+Reads the corpus from `s3://prod-egocentric-humyn-data/raw/…`; writes results to
+the `output/` volume **and** to `s3://stage-egocentric-humyn-data/flicker_results/`.
+
+```bash
+docker logs -f flicker                                     # live output
+docker exec flicker python scripts/check_progress.py       # progress and ETA
+docker stop -t 60 flicker && docker start flicker          # resumes where it left off
+```
+
+Two things that cost the most when missed, both covered in DOCKER.md:
+
+- **`--gpus all`**, or it silently falls back to software decode at ~6× the CPU.
+  Confirm `decode=cuda` appears in `docker logs`.
+- **The IMDSv2 hop limit must be 2**, or the container cannot see the instance role
+  and reports `Unable to locate credentials` even when one is attached.
+
+Smoke-test with ten rows before committing days of compute:
+
+```bash
+docker run --rm --gpus all -v /data/input:/app/input:ro -v /data/output:/app/output \
+  flicker:0.2.0 --from-row 0 --to-row 9
+```
+
+## Running without Docker
+
+For development, or on a box that is already set up. Everything below this section
+assumes this path.
 
 ```bash
 uv sync --locked
+export AWS_ACCESS_KEY_ID="..." AWS_SECRET_ACCESS_KEY="..." AWS_SESSION_TOKEN="..."
+
+scripts/run_batch.sh --from-row 0 --to-row 6649      # one shard
+uv run python main.py --links --print-shards 20      # the ranges
 ```
+
+`scripts/run_batch.sh` is what the container's entry point runs, so the two paths
+behave identically: same thread pinning, same worker default, same output layout,
+same `--resume`.
 
 ## Data access
 
-Videos are read directly from S3. The corpus lives under
-`s3://humyn-data-partners-prod/visionlab/visionlab/outbound/`, configured as
-`s3.bucket` and `s3.prefix` in `configs/detector.yaml`.
+Videos are read directly from S3. The production corpus is
+`s3://prod-egocentric-humyn-data`, named row by row by `input/all_s3links_updated.xlsx`
+via `s3.links` in `configs/detector_1.yaml`. `configs/detector.yaml` is the older
+reference-corpus config and is the default only outside Docker.
 
 Credentials come from the standard AWS chain — environment variables, a named
 profile (`--aws-profile`), or an instance role. Nothing is read from the repo:
@@ -26,14 +88,19 @@ export AWS_SECRET_ACCESS_KEY="..."
 export AWS_SESSION_TOKEN="..."      # required for temporary ASIA... credentials
 ```
 
+**Prefer an IAM instance profile for long runs.** A shard takes days and exported
+STS/SSO tokens expire in hours; when they do, the batch stops being able to read
+the corpus, not just to upload. Instance-role credentials refresh themselves.
+
 `s3.region` must match the bucket's region (`ap-south-1`), because SigV4
-presigning is region-scoped and a mismatch yields URLs that fail with 403.
+presigning is region-scoped and a mismatch yields URLs that fail with 403. The
+results bucket gets its own `s3.output_region` when it differs.
 
 **No presigned URL is ever stored.** A manifest holds only `s3://bucket/key`
 URIs; each worker signs a short-lived URL for its own video immediately before
-decoding it, and signatures are redacted from logs. FFmpeg then reads that
-object over HTTP range requests, so windowed sampling transfers only the bytes
-it analyzes rather than the whole file.
+decoding it, and signatures are redacted from logs — including inside error
+messages, which is where one used to escape into the output file. FFmpeg then
+reads that object over HTTP range requests.
 
 ## Process the corpus from S3
 

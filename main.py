@@ -912,7 +912,14 @@ def main() -> None:
             "without scoring. Pin a run by scoring the snapshot with --manifest."
         ),
     )
-    parser.add_argument("--config", default="configs/detector.yaml")
+    parser.add_argument(
+        "--config",
+        # Overridable by environment so an image or a host can set the
+        # production config once, instead of every invocation repeating it
+        # and one of them forgetting.
+        default=os.environ.get("FLICKER_CONFIG", "configs/detector.yaml"),
+        help="Detector config (default: $FLICKER_CONFIG or configs/detector.yaml)",
+    )
     parser.add_argument("--logging-config", default="configs/logging.yaml")
     parser.add_argument(
         "--output",
